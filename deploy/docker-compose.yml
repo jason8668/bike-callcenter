@@ -1,0 +1,26 @@
+# Bridge middleware only. Zammad itself runs from the official
+# zammad-docker-compose stack (cloned by install-server.sh into ./zammad),
+# FusionPBX/FreeSWITCH runs on the host (its installer is not Docker based).
+services:
+  bridge:
+    build: ../middleware
+    container_name: bike-bridge
+    restart: unless-stopped
+    env_file:
+      - ../middleware/.env
+    environment:
+      # Reach Zammad's nginx on the host-published port 8080.
+      ZAMMAD_URL: http://host.docker.internal:8080
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # Localhost only: FreeSWITCH on the same host posts events/CDR here.
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - bridge-data:/data
+      # Read-only mount of the FreeSWITCH recordings directory.
+      # Adjust the host path to your FusionPBX domain recordings folder.
+      - /var/lib/freeswitch/recordings:/recordings:ro
+
+volumes:
+  bridge-data:

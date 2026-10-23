@@ -1,0 +1,11 @@
+# docker-compose.override.yml for the official zammad stack.
+# install-server.sh copies this into ./zammad/docker-compose.override.yml.
+# Goals for a 5-seat trial on a 4C/8G box:
+#   * publish Zammad on 8080 (FusionPBX keeps 80/443)
+#   * keep memory low; Elasticsearch is disabled via .env
+#     (ELASTICSEARCH_ENABLED=false) plus the official scenario file
+#     scenarios/disable-elasticsearch.yml from the zammad repo.
+services:
+  zammad-nginx:
+    ports:
+      - "8080:8080"

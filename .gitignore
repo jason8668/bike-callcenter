@@ -1,0 +1,6 @@
+.env
+middleware/.env
+deploy/zammad/
+*.db
+__pycache__/
+recordings/
