@@ -59,9 +59,11 @@ fi
 if ! docker compose version >/dev/null 2>&1; then
   echo "Distro has no compose plugin package; installing the official binary..."
   mkdir -p /usr/local/lib/docker/cli-plugins
-  curl -fL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
-    -o /usr/local/lib/docker/cli-plugins/docker-compose \
-    || curl -fL https://gh-proxy.com/https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
+  # Direct github.com is unreliable from mainland cloud hosts and gh-proxy
+  # can drop mid-download: use HTTP/1.1 + resume + retries (learned live
+  # 2026-10-23: one-shot download died at 78% with an HTTP/2 stream error).
+  curl -fL --http1.1 -C - --retry 20 --retry-delay 5 --retry-all-errors \
+    https://gh-proxy.com/https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
     -o /usr/local/lib/docker/cli-plugins/docker-compose
   chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 fi
