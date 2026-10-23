@@ -35,10 +35,30 @@ fi
 
 echo "[2/6] Install Docker if missing"
 if ! command -v docker >/dev/null 2>&1; then
-  curl -fsSL https://get.docker.com | sh
+  echo "Trying official get.docker.com installer..."
+  curl -fsSL https://get.docker.com | sh || true
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Falling back to distro packages (docker.io)..."
+  apt-get update && apt-get install -y docker.io
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "Installing docker compose v2 plugin from distro packages..."
+  apt-get install -y docker-compose-v2 || apt-get install -y docker-compose-plugin || true
 fi
 docker --version
 docker compose version
+
+echo "[2.5/6] Configure registry mirrors (fast image pulls in mainland China)"
+mkdir -p /etc/docker
+if [ ! -f /etc/docker/daemon.json ]; then
+  cat > /etc/docker/daemon.json <<'EOF'
+{"registry-mirrors": ["https://docker.m.daocloud.io", "https://docker.1panel.live"]}
+EOF
+fi
+(systemctl restart docker || service docker restart) || true
+sleep 2
+docker info >/dev/null 2>&1 && echo "docker daemon OK"
 
 clone_repo() {
   # $1 = https repo url, $2 = target dir.
