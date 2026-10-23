@@ -1,11 +1,30 @@
 # docker-compose.override.yml for the official zammad stack.
-# install-server.sh copies this into ./zammad/docker-compose.override.yml.
-# Goals for a 5-seat trial on a 4C/8G box:
-#   * publish Zammad on 8080 (FusionPBX keeps 80/443)
-#   * keep memory low; Elasticsearch is disabled via .env
-#     (ELASTICSEARCH_ENABLED=false) plus the official scenario file
-#     scenarios/disable-elasticsearch.yml from the zammad repo.
+# install-server.sh copies this into ./zammad/docker-compose.override.yml
+# and lists it (plus the official disable-elasticsearch scenario) in the
+# COMPOSE_FILE variable of zammad's .env.
+# Co-location mode (trial on the same 4C/8G server as the course demo):
+#   * Port: set NGINX_EXPOSE_PORT=8899 in zammad's .env (done by the
+#     installer). NOT 8080: on the unfiled mainland cloud instance the
+#     filing ports {80, 8080, 443, 8443} are blocked inbound; ports like
+#     8888/8899 work (same lesson as the course system moving to 8888).
+#   * Elasticsearch service disabled via the official scenario file
+#     scenarios/disable-elasticsearch-service.yml (profile do-not-start).
+#   * Per-service memory caps below, so Zammad can never starve the
+#     course demo running on the same host.
 services:
   zammad-nginx:
-    ports:
-      - "8080:8080"
+    mem_limit: 128m
+  zammad-railsserver:
+    mem_limit: 1536m
+  zammad-websocket:
+    mem_limit: 512m
+  zammad-scheduler:
+    mem_limit: 512m
+  zammad-postgresql:
+    mem_limit: 512m
+  zammad-redis:
+    mem_limit: 128m
+  zammad-memcached:
+    mem_limit: 128m
+  zammad-backup:
+    mem_limit: 256m

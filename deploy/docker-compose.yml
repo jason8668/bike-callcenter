@@ -8,9 +8,10 @@ services:
     restart: unless-stopped
     env_file:
       - ../middleware/.env
+    mem_limit: 256m
     environment:
-      # Reach Zammad's nginx on the host-published port 8080.
-      ZAMMAD_URL: http://host.docker.internal:8080
+      # Reach Zammad's nginx on the host-published port 8899.
+      ZAMMAD_URL: http://host.docker.internal:8899
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

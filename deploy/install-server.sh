@@ -1,13 +1,19 @@
 #!/bin/bash
 # ============================================================
-# bike-callcenter trial installer (run as root on a FRESH server)
-# - Installs Docker if missing
-# - Clones THIS repo from GitHub (edit REPO_URL below first)
-# - Starts Zammad (official docker-compose, Elasticsearch disabled, port 8080)
+# bike-callcenter trial installer (run as root)
+# CO-LOCATION MODE: designed to share the 4C/8G course-demo server.
+# - Zammad runs as Docker containers on host port 8899 (NOT 8080:
+#   filing ports 80/8080/443/8443 are blocked inbound on this instance)
+# - Elasticsearch disabled + per-container memory caps (see
+#   deploy/zammad-override.yml) so the course demo keeps its share
+# - Adds a 2G swap file if the host has none (burst protection)
 # - Builds and starts the bridge middleware (port 127.0.0.1:8090)
-# - FusionPBX/FreeSWITCH is NOT installed by this script:
-#   run the official FusionPBX installer on a Debian 12 host (can be a
-#   second machine), see docs/05-cloud-deploy-guide.md
+# - FusionPBX is NOT installed by this script on a shared host: its
+#   installer takes over the host (nginx 80/443, system packages).
+#   Test phase 2 uses a plain FreeSWITCH container instead;
+#   FusionPBX UI goes to a dedicated host only if the project goes live.
+# NOTE: this GitHub repo is PRIVATE. git clone will ask for the GitHub
+# username and a Personal Access Token (or make the repo public first).
 # All commands/outputs are English-only on purpose (VNC console friendly).
 # ============================================================
 set -e
@@ -17,7 +23,15 @@ APP_DIR="/opt/bike-callcenter"
 
 echo "[1/6] System check"
 cat /etc/os-release | head -2
-free -h | head -2
+free -h
+docker ps --format "table {{.Names}}\t{{.Status}}" || true
+if ! swapon --show | grep -q .; then
+  echo "No swap found, creating a 2G swap file (burst protection)..."
+  fallocate -l 2G /swapfile-bike || dd if=/dev/zero of=/swapfile-bike bs=1M count=2048
+  chmod 600 /swapfile-bike
+  mkswap /swapfile-bike && swapon /swapfile-bike
+  free -h
+fi
 
 echo "[2/6] Install Docker if missing"
 if ! command -v docker >/dev/null 2>&1; then
@@ -41,11 +55,17 @@ if [ ! -d zammad ]; then
 fi
 cd zammad
 cp -n .env.dist .env || true
-# Disable Elasticsearch (trial, saves ~1.5GB RAM) and set a random secret
-sed -i 's/^ELASTICSEARCH_ENABLED=.*/ELASTICSEARCH_ENABLED=false/' .env || echo "ELASTICSEARCH_ENABLED=false" >> .env
 cp "$APP_DIR/deploy/zammad-override.yml" docker-compose.override.yml
+# Co-location settings in zammad's .env:
+# - publish nginx on host port 8899 (8080 is a blocked filing port here)
+# - disable the Elasticsearch service via the official scenario file
+# - include our override (memory caps) in the compose file chain
+grep -q '^NGINX_EXPOSE_PORT=' .env && sed -i 's/^NGINX_EXPOSE_PORT=.*/NGINX_EXPOSE_PORT=8899/' .env || echo "NGINX_EXPOSE_PORT=8899" >> .env
+grep -q '^ELASTICSEARCH_ENABLED=' .env && sed -i 's/^ELASTICSEARCH_ENABLED=.*/ELASTICSEARCH_ENABLED=false/' .env || echo "ELASTICSEARCH_ENABLED=false" >> .env
+COMPOSE_LINE="COMPOSE_FILE=docker-compose.yml:scenarios/disable-elasticsearch-service.yml:docker-compose.override.yml"
+grep -q '^COMPOSE_FILE=' .env && sed -i "s|^COMPOSE_FILE=.*|$COMPOSE_LINE|" .env || echo "$COMPOSE_LINE" >> .env
 echo "Starting Zammad (first start takes several minutes)..."
-docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+docker compose up -d
 
 echo "[5/6] Prepare bridge middleware env"
 cd "$APP_DIR/middleware"
@@ -65,15 +85,16 @@ docker compose up -d --build bridge
 
 echo "------------------------------------------------------------"
 echo "Zammad status:"
-docker compose -f zammad/docker-compose.yml -f zammad/docker-compose.override.yml ps || true
+(cd zammad && docker compose ps) || true
 echo "Bridge health:"
 sleep 3
 curl -s http://127.0.0.1:8090/health || echo "bridge not up yet, check: docker logs bike-bridge"
 echo ""
 echo "Next steps:"
-echo " 1) Open http://<server-ip>:8080 and finish Zammad first-run setup."
+echo " 1) Open http://<server-ip>:8899 and finish Zammad first-run setup."
+echo "    (Cloud security group must allow inbound TCP 8899 first.)"
 echo " 2) Create tokens, fill middleware/.env, run the field setup script:"
-echo "    ZAMMAD_URL=http://127.0.0.1:8080 ZAMMAD_TOKEN=xxx python3 $APP_DIR/zammad-setup/setup_bike_fields.py"
+echo "    ZAMMAD_URL=http://127.0.0.1:8899 ZAMMAD_TOKEN=xxx python3 $APP_DIR/zammad-setup/setup_bike_fields.py"
 echo " 3) Simulate one call to verify the whole chain:"
 echo "    curl -X POST http://127.0.0.1:8090/simulate/call -H \"X-Bridge-Secret: <secret from middleware/.env>\""
 echo "Done."

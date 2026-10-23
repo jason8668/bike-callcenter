@@ -20,7 +20,7 @@ list for this project (in flow order):
   -> returned 已回传 -> callback 待回访 -> closed 办结 (closed) / merged 归档
 
 Usage:
-  ZAMMAD_URL=http://127.0.0.1:8080 ZAMMAD_TOKEN=xxx python3 setup_bike_fields.py
+  ZAMMAD_URL=http://127.0.0.1:8899 ZAMMAD_TOKEN=xxx python3 setup_bike_fields.py
 Uses only the Python standard library.
 """
 import json
@@ -28,7 +28,7 @@ import os
 import urllib.request
 import urllib.error
 
-BASE = os.environ.get("ZAMMAD_URL", "http://127.0.0.1:8080").rstrip("/")
+BASE = os.environ.get("ZAMMAD_URL", "http://127.0.0.1:8899").rstrip("/")
 TOKEN = os.environ["ZAMMAD_TOKEN"]
 
 GROUPS = ["客服组", "报修组", "投诉组", "咨询组", "运维组"]
