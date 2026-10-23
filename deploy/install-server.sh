@@ -21,6 +21,13 @@ set -e
 REPO_URL="https://github.com/jason8668/bike-callcenter.git"
 APP_DIR="/opt/bike-callcenter"
 
+echo "[0/6] Prerequisites (git/curl are missing on minimal images)"
+if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+  apt-get update && apt-get install -y git curl ca-certificates
+fi
+git --version || true
+curl --version | head -1 || true
+
 echo "[1/6] System check"
 cat /etc/os-release | head -2
 free -h
