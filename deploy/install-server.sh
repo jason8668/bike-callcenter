@@ -12,8 +12,8 @@
 #   installer takes over the host (nginx 80/443, system packages).
 #   Test phase 2 uses a plain FreeSWITCH container instead;
 #   FusionPBX UI goes to a dedicated host only if the project goes live.
-# NOTE: this GitHub repo is PRIVATE. git clone will ask for the GitHub
-# username and a Personal Access Token (or make the repo public first).
+# NOTE: the project repo was made PUBLIC on 2026-10-23 so this server can
+# clone it without credentials (same as the course project repo).
 # All commands/outputs are English-only on purpose (VNC console friendly).
 # ============================================================
 set -e
@@ -40,18 +40,28 @@ fi
 docker --version
 docker compose version
 
+clone_repo() {
+  # $1 = https repo url, $2 = target dir.
+  # Mainland cloud hosts sometimes cannot reach github.com directly;
+  # fall back to the gh-proxy mirror (same pattern as the course project).
+  if [ -d "$2/.git" ]; then
+    (cd "$2" && git pull) && return 0
+    echo "git pull failed for $2, keeping local copy."
+    return 0
+  fi
+  git clone "$1" "$2" && return 0
+  echo "Direct GitHub clone failed, trying gh-proxy mirror..."
+  git clone "https://gh-proxy.com/$1" "$2"
+}
+
 echo "[3/6] Clone project repo"
-if [ -d "$APP_DIR/.git" ]; then
-  cd "$APP_DIR" && git pull
-else
-  git clone "$REPO_URL" "$APP_DIR"
-  cd "$APP_DIR"
-fi
+clone_repo "$REPO_URL" "$APP_DIR"
+cd "$APP_DIR"
 
 echo "[4/6] Prepare Zammad stack"
 cd "$APP_DIR/deploy"
 if [ ! -d zammad ]; then
-  git clone https://github.com/zammad/zammad-docker-compose.git zammad
+  clone_repo https://github.com/zammad/zammad-docker-compose.git zammad
 fi
 cd zammad
 cp -n .env.dist .env || true
