@@ -56,6 +56,15 @@ if ! docker compose version >/dev/null 2>&1; then
   echo "Installing docker compose v2 plugin from distro packages..."
   apt-get install -y docker-compose-v2 || apt-get install -y docker-compose-plugin || true
 fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "Distro has no compose plugin package; installing the official binary..."
+  mkdir -p /usr/local/lib/docker/cli-plugins
+  curl -fL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
+    -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    || curl -fL https://gh-proxy.com/https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
+    -o /usr/local/lib/docker/cli-plugins/docker-compose
+  chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+fi
 docker --version
 docker compose version
 
