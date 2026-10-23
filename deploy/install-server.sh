@@ -22,6 +22,9 @@ REPO_URL="https://github.com/jason8668/bike-callcenter.git"
 APP_DIR="/opt/bike-callcenter"
 
 echo "[0/6] Prerequisites (git/curl are missing on minimal images)"
+# The cloud internal apt mirror can be an old snapshot whose Release files
+# are past Valid-Until; ignore the expiry so apt keeps working.
+echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
 if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
   apt-get update && apt-get install -y git curl ca-certificates
 fi
