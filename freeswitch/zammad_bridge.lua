@@ -2,21 +2,18 @@
 -- FreeSWITCH Lua hook: pushes call events to the bridge middleware so Zammad
 -- can pop the caller card (newCall/answer) in real time.
 -- The ticket is opened on answer (so agents can take notes during the
--- call); only the recording is attached on hangup via mod_xml_cdr ->
+-- call); only the recording is attached on hangup via mod_json_cdr ->
 -- POST /cdr, so this script stays fast and never blocks the call.
 --
--- Install:
---   1) Copy to /usr/share/freeswitch/scripts/zammad_bridge.lua
---   2) In the inbound dialplan (FusionPBX: Dialplan Manager), BEFORE the
---      bridge/queue action add:
---        action lua zammad_bridge.lua newCall
---      and on the agent leg (after bridge) add:
---        action lua zammad_bridge.lua answer
---   3) Set the two channel variables below via FusionPBX "global" settings
---      or in vars.xml. The secret must match BRIDGE_SECRET in middleware/.env
+-- Install: the Docker image copies this file to
+-- /usr/share/freeswitch/scripts/. The queue dialplan sets
+-- bridge_event_url (host port 8890, reachable via host networking),
+-- bridge_secret (from middleware/.env, injected by install-freeswitch.sh)
+-- and bridge_ticket=1 before calling it; execute_on_answer runs it again
+-- with "answer" when the queued call is bridged to an agent.
 
 local bridge_url = session and session:getVariable("bridge_event_url")
-  or "http://127.0.0.1:8090/events/call"
+  or "http://127.0.0.1:8890/events/call"
 local bridge_secret = session and session:getVariable("bridge_secret") or ""
 
 local event = argv and argv[1] or "newCall"

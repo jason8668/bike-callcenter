@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<configuration name="callcenter.conf" description="CallCenter">
+  <settings>
+    <param name="odbc-dsn" value=""/>
+  </settings>
+  <queues>
+    <queue name="客服队列">
+      <!-- Round-robin: seats take turns (first of the three answering
+           strategies; longest-idle and fewest-calls are one-word
+           changes to this value). -->
+      <param name="strategy" value="round-robin"/>
+      <param name="moh-sound" value="tone_stream://%(1000,1000,440)"/>
+      <param name="time-base-score" value="system"/>
+      <param name="max-wait-time" value="60"/>
+      <param name="max-wait-time-with-no-agent" value="30"/>
+      <param name="tier-rules-apply" value="false"/>
+      <param name="tier-rule-wait-second" value="300"/>
+      <param name="tier-rule-wait-multiply-level" value="true"/>
+      <param name="tier-rule-no-agent-no-wait" value="false"/>
+      <param name="discard-abandoned-after" value="60"/>
+      <param name="abandoned-resume-allowed" value="false"/>
+    </queue>
+  </queues>
+  <agents>
+    <agent name="8001" type="callback" contact="user/8001" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
+    <agent name="8002" type="callback" contact="user/8002" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
+    <agent name="8003" type="callback" contact="user/8003" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
+    <agent name="8004" type="callback" contact="user/8004" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
+    <agent name="8005" type="callback" contact="user/8005" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
+  </agents>
+  <tiers>
+    <tier agent="8001" queue="客服队列" level="1" position="1"/>
+    <tier agent="8002" queue="客服队列" level="1" position="2"/>
+    <tier agent="8003" queue="客服队列" level="1" position="3"/>
+    <tier agent="8004" queue="客服队列" level="1" position="4"/>
+    <tier agent="8005" queue="客服队列" level="1" position="5"/>
+  </tiers>
+</configuration>

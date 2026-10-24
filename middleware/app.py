@@ -54,8 +54,11 @@ bridge = Bridge(
 app = FastAPI(title="bike-callcenter bridge", version="1.0.0")
 
 
-def check_secret(x_bridge_secret: str | None):
-    if BRIDGE_SECRET and x_bridge_secret != BRIDGE_SECRET:
+def check_secret(x_bridge_secret: str | None, alt_secret: str | None = None):
+    # FreeSWITCH's json_cdr cannot send custom headers, so the CDR
+    # endpoint also accepts ?secret= (localhost traffic only, same host
+    # as the .env file). All other endpoints are header-only.
+    if BRIDGE_SECRET and x_bridge_secret != BRIDGE_SECRET and alt_secret != BRIDGE_SECRET:
         raise HTTPException(status_code=401, detail="bad bridge secret")
 
 
@@ -74,7 +77,7 @@ async def call_event(request: Request, x_bridge_secret: str | None = Header(defa
 
 @app.post("/cdr")
 async def cdr(request: Request, x_bridge_secret: str | None = Header(default=None)):
-    check_secret(x_bridge_secret)
+    check_secret(x_bridge_secret, request.query_params.get("secret"))
     content_type = request.headers.get("content-type", "")
     if "json" in content_type:
         payload = await request.json()
@@ -379,7 +382,8 @@ async def simulate(request: Request, x_bridge_secret: str | None = Header(defaul
         w.writeframes(b"".join(struct.pack("<h", 0) for _ in range(8000)))
     base = {"uuid": call_id, "caller_id_number": caller,
             "destination_number": "4008000000", "direction": "inbound",
-            "ivr_choice": ivr_choice, "start_epoch": int(time.time())}
+            "ivr_choice": ivr_choice, "start_epoch": int(time.time()),
+            "bridge_ticket": "1"}
     bridge.handle_event("newCall", base)
     bridge.handle_event("answer", base)
     return bridge.handle_cdr({**base, "billsec": "65", "duration": "75",

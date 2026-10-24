@@ -1,6 +1,9 @@
 .env
 middleware/.env
 agents.txt
+freeswitch/conf-live/
+freeswitch/extensions.txt
+freeswitch/esl-password.txt
 deploy/zammad/
 *.db
 __pycache__/

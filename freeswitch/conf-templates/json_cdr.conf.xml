@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!-- JSON CDR, not XML: the bridge /cdr endpoint reads JSON directly.
+     log-b-leg=false posts only the caller (A) leg, so callcenter agent
+     legs never reach the bridge. The secret rides in the query string
+     because json_cdr cannot send custom headers (localhost only). -->
+<configuration name="json_cdr.conf" description="JSON CDR">
+  <settings>
+    <param name="url" value="http://127.0.0.1:8890/cdr?secret=__BRIDGE_SECRET__"/>
+    <param name="log-b-leg" value="false"/>
+    <param name="retries" value="3"/>
+  </settings>
+</configuration>

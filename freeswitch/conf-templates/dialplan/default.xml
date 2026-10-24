@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<include>
+  <context name="default">
+    <!-- Seat-to-seat calls: plain bridge, NO ticket hooks. The bridge
+         only creates tickets for legs carrying bridge_ticket=1 (the
+         queue below), so internal calls land in statistics only. -->
+    <extension name="internal">
+      <condition field="destination_number" expression="^(800[1-5])$">
+        <action application="set" data="hangup_after_bridge=true"/>
+        <action application="bridge" data="sofia/internal/${destination_number}"/>
+      </condition>
+    </extension>
+
+    <!-- Hotline entry (internal test: dial 8000; later the 400 DID
+         transfers here). Plain call, no pre-classification: the ticket
+         enters untyped and agents fill type/fault while talking. -->
+    <extension name="queue">
+      <condition field="destination_number" expression="^8000$">
+        <action application="set" data="bridge_event_url=http://127.0.0.1:8890/events/call"/>
+        <action application="set" data="bridge_secret=__BRIDGE_SECRET__"/>
+        <!-- Marker the bridge requires before creating a ticket. -->
+        <action application="set" data="bridge_ticket=1"/>
+        <!-- Runs when the queued call is bridged to an agent: the
+             ticket pops DURING the call. Verify in the internal test;
+             if it does not fire, the CDR still creates the ticket at
+             hangup (late) and the queue dialplan must be reworked. -->
+        <action application="set" data="execute_on_answer=lua zammad_bridge.lua answer"/>
+        <action application="lua" data="zammad_bridge.lua newCall"/>
+        <action application="callcenter" data="客服队列"/>
+        <!-- Queue timeout with no agent: fall through to voicemail. -->
+        <action application="transfer" data="8009 XML default"/>
+      </condition>
+    </extension>
+
+    <!-- Voicemail: record, then the hangup hook posts to the bridge.
+         The recording file is named after the CallID so the bridge
+         finds it in the shared /recordings volume. -->
+    <extension name="voicemail">
+      <condition field="destination_number" expression="^8009$">
+        <action application="set" data="bridge_voicemail=1"/>
+        <action application="set" data="voicemail_url=http://127.0.0.1:8890/events/voicemail"/>
+        <action application="set" data="bridge_secret=__BRIDGE_SECRET__"/>
+        <action application="set" data="api_hangup_hook=lua zammad_voicemail.lua"/>
+        <action application="answer"/>
+        <action application="record" data="/recordings/${uuid}.wav 300 200 5"/>
+        <action application="hangup"/>
+      </condition>
+    </extension>
+  </context>
+</include>

@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<configuration name="switch.conf" description="Core">
+  <settings>
+    <!-- Narrow RTP range on purpose: only these UDP ports need a
+         security-group rule (5 seats + tests never need 32k ports). -->
+    <param name="rtp-start-port" value="16384"/>
+    <param name="rtp-end-port" value="16884"/>
+    <param name="max-sessions" value="200"/>
+    <param name="sessions-per-second" value="30"/>
+  </settings>
+</configuration>

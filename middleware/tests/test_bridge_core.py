@@ -51,6 +51,7 @@ CDR = {
     "destination_number": "4008000000", "billsec": "65", "duration": "75",
     "start_epoch": "1792800000", "ivr_choice": "1",
     "recording_path": "/var/lib/freeswitch/recordings/abc-123.wav",
+    "bridge_ticket": "1",
 }
 
 
@@ -153,7 +154,7 @@ class TestBridge(unittest.TestCase):
         out = self.bridge.handle_event("answer", {
             "uuid": "live-1", "caller_id_number": "13800000000",
             "destination_number": "4008000000", "direction": "inbound",
-            "start_epoch": "1792800000"})
+            "start_epoch": "1792800000", "bridge_ticket": "1"})
         self.assertTrue(out["ok"])
         self.assertEqual(out["ticket_id"], 101)
         ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
@@ -169,7 +170,7 @@ class TestBridge(unittest.TestCase):
         self.bridge.handle_event("answer", {
             "uuid": "live-2", "caller_id_number": "13800000000",
             "destination_number": "4008000000", "direction": "inbound",
-            "start_epoch": "1792800000"})
+            "start_epoch": "1792800000", "bridge_ticket": "1"})
         out = self.bridge.handle_cdr({**CDR, "uuid": "live-2"})
         self.assertTrue(out["ok"])
         self.assertEqual(out["ticket_id"], 101)
@@ -202,6 +203,25 @@ class TestBridge(unittest.TestCase):
         self.assertNotIn("ticket_id", out)
         ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
         self.assertEqual(len(ticket_posts), 0)
+
+    def test_non_ticket_legs_create_no_ticket(self):
+        """Internal extension calls, outbound legs and voicemail legs
+        must never own a ticket (statistics only)."""
+        internal = self.bridge.handle_cdr(
+            {**CDR, "uuid": "int-1", "destination_number": "8002",
+             "bridge_ticket": ""})
+        self.assertIsNone(internal["ticket_id"])
+        outbound = self.bridge.handle_cdr(
+            {**CDR, "uuid": "out-1", "direction": "outbound"})
+        self.assertIsNone(outbound["ticket_id"])
+        vm_leg = self.bridge.handle_cdr(
+            {**CDR, "uuid": "vmleg-1", "bridge_ticket": "",
+             "bridge_voicemail": "1"})
+        self.assertIsNone(vm_leg["ticket_id"])
+        no_flag = self.bridge.handle_event("answer", {
+            "uuid": "noflag-1", "caller_id_number": "13800000000",
+            "destination_number": "4008000000", "direction": "inbound"})
+        self.assertNotIn("ticket_id", no_flag)
 
     def test_missed_call_creates_no_ticket(self):
         out = self.bridge.handle_cdr({**CDR, "uuid": "miss-1", "billsec": "0", "duration": "20"})

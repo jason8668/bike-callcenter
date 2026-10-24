@@ -51,6 +51,14 @@ class CallRecord:
     ivr_choice: str = ""           # DTMF picked in the IVR, e.g. "1"
     agent: str = ""                # agent extension / number, if known
     hangup_cause: str = ""
+    # Dialplan markers (FreeSWITCH sets them as channel variables; the
+    # JSON CDR carries them under "variables"). bridge_ticket=1 means
+    # this leg went through the hotline/queue dialplan and owns a
+    # ticket; internal extension-to-extension legs and B-legs do not
+    # set it and must never create tickets. bridge_voicemail=1 marks
+    # the voicemail leg, whose ticket is owned by the voicemail path.
+    ticket_flag: bool = False
+    is_voicemail: bool = False
 
     # IVR digit -> ticket routing for the bicycle hotline.
     # "voicemail" is a pseudo choice set by the voicemail ingest path
@@ -124,6 +132,8 @@ def parse_cdr(payload: dict) -> CallRecord:
         recording_url=str(g("recording_url", "record_url")),
         ivr_choice=str(g("ivr_choice", "dtmf", "menu_choice")),
         agent=str(g("agent", "cc_agent", "answering_number")),
+        ticket_flag=str(g("bridge_ticket")).lower() in ("1", "true"),
+        is_voicemail=str(g("bridge_voicemail")).lower() in ("1", "true"),
         hangup_cause=str(g("hangup_cause")),
     )
 
@@ -566,7 +576,7 @@ class Bridge:
         # hangup. On answer (inbound only), open the ticket now; the
         # recording is attached later, when the CDR arrives. A missed
         # call never sends answer, so it still creates no ticket.
-        if event == "answer" and rec.direction == "in":
+        if event == "answer" and rec.direction == "in" and rec.ticket_flag:
             existing = self.store.get_ticket_id(rec.call_id)
             if existing:
                 return {"ok": True, "call_id": rec.call_id, "event": event,
@@ -613,13 +623,26 @@ class Bridge:
         rec = parse_cdr(payload)
         if not rec.call_id:
             return {"ok": False, "error": "missing call_id/uuid"}
-        # 1) close the CTI log entry
-        self.zammad.push_cti_event("hangup", rec)
+        # 1) close the CTI log entry, but only for legs that had one:
+        # queue legs push newCall/answer via the Lua hook; internal,
+        # outbound and voicemail legs never open a CTI entry.
+        if rec.ticket_flag:
+            self.zammad.push_cti_event("hangup", rec)
         # 2) missed call -> statistics only, no ticket
         if not rec.answered:
             self.store.record(rec, None)
             return {"ok": True, "call_id": rec.call_id, "ticket_id": None,
                     "note": "missed call, no ticket created"}
+        # 2b) legs that must never own a ticket: outbound legs (e.g.
+        # callcenter agent legs), voicemail legs (the voicemail path
+        # owns their ticket), and internal extension calls (no
+        # bridge_ticket marker from the queue dialplan). Statistics
+        # only; an existing ticket binding is left untouched.
+        if rec.direction != "in" or rec.is_voicemail or not rec.ticket_flag:
+            bound = self.store.get_ticket_id(rec.call_id)
+            self.store.record(rec, bound)
+            return {"ok": True, "call_id": rec.call_id, "ticket_id": bound,
+                    "note": "statistics only, no ticket for this leg"}
         # 3) idempotency: one CallID = one ticket. If the ticket was
         # already opened at answer time, the CDR only attaches the
         # recording to it (once); otherwise the ticket is created now,

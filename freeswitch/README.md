@@ -1,71 +1,134 @@
-# FreeSWITCH / FusionPBX 侧接线说明
+# FreeSWITCH 侧接线说明（Docker 版，内部测试先行）
 
-中间件有两条入线，缺一不可：
+话务层跑在服务器上的一个容器里（`bike-freeswitch`，host 网络），
+配置由 `deploy/install-freeswitch.sh` 从 `conf-templates/` 生成到
+`conf-live/`（密码与密钥只在服务器上，不进 Git）。
+
+```
+客服系统  http://36.139.118.227:8899   (Zammad)
+中间件    http://36.139.118.227:8890   (测试页 / 建坐席 / 来电看板)
+话务层    36.139.118.227:5060 UDP     (SIP，无网页；状态用 fs_cli 看)
+```
+
+## 0. 内部测试先行，400 中继在后
+
+- 现在装的是：5 个坐席分机 8001–8005、客服队列 8000（轮流接听）、
+  语音留言 8009。坐席用软电话（MicroSIP / Zoiper / Linphone）注册
+  到 36.139.118.227，内部互打和进队列都能测。
+- 400 中继还没接：客户给中继参数（SIP 服务器/账号/密码/域名）后，
+  再加一个网关 + 一个 DID 转队列的拨号计划，队列和工单逻辑不用改。
+- 本阶段没有 IVR：按 2026-10-24 的定稿，来电是普通电话直接进队列，
+  不做前置类别选择；故障类型、问题类型由客服接听时自己判断填写。
 
 ## 1. 实时事件线（负责弹屏）—— Lua 钩子
 
-- 文件：`zammad_bridge.lua`，拷到 FreeSWITCH 的 `/usr/share/freeswitch/scripts/`。
-- FusionPBX「Dialplan Manager」在 400 呼入拨号计划里、进 IVR/队列之前加一条 action：`lua zammad_bridge.lua newCall`；坐席接通的 leg 上加 `lua zammad_bridge.lua answer`。
-- IVR 按键结果要写进通道变量 `ivr_choice`（FusionPBX 的 IVR 菜单本身会把按键带到后续动作；在进队列前加 `set ivr_choice=${menu_dtmf}` 一类的赋值，按实际菜单变量名调整）。中间件据此把工单分到 报修组/投诉组/咨询组/客服组。
+- 文件：`zammad_bridge.lua`，镜像里拷到 `/usr/share/freeswitch/scripts/`。
+- 队列拨号计划（`conf-templates/dialplan/default.xml`）里：
+  进队列前 `lua zammad_bridge.lua newCall`；`execute_on_answer` 在
+  呼叫被坐席接通时再跑一次 `lua zammad_bridge.lua answer`。
+- 拨号计划同时设三个通道变量：`bridge_event_url`
+  （http://127.0.0.1:8890/events/call，host 网络下直达中间件）、
+  `bridge_secret`（与中间件 `.env` 一致，安装脚本注入）、
+  `bridge_ticket=1`（中间件认这个标记才建单；坐席互打没有它，
+  只进通话统计，不建单）。
 
-## 2. 挂机话单线（负责建单 + 录音绑定）—— mod_xml_cdr
+## 2. 挂机话单线（负责建单 + 录音绑定）—— mod_json_cdr
 
-在 FusionPBX 服务器的 `autoload_configs/xml_cdr.conf.xml`（或 FusionPBX 的模块设置）里启用：
+`conf-templates/json_cdr.conf.xml`：
 
 ```xml
-<configuration name="xml_cdr.conf" description="XML CDR">
+<configuration name="json_cdr.conf" description="JSON CDR">
   <settings>
-    <param name="url" value="http://127.0.0.1:8890/cdr"/>
-    <param name="encode" value="base64"/>
-    <!-- 用自定义头带密钥时改为在中间件同机部署、用内网地址+防火墙收口；
-         如xml_cdr版本支持headers参数，再加 X-Bridge-Secret -->
+    <param name="url" value="http://127.0.0.1:8890/cdr?secret=__BRIDGE_SECRET__"/>
     <param name="log-b-leg" value="false"/>
-    <param name="err-log-dir" value="/var/log/freeswitch/xml_cdr"/>
   </settings>
 </configuration>
 ```
 
 要点：
-- 每通 CDR 的 `uuid` 就是 CallID，中间件以它做幂等键，重复投递不会重复建单；
-- CDR 里需要带 `record_path`/`recording_url`（FusionPBX 的录音应用会把录音路径写进通道变量 `record_path`，确认拨号计划里录音开启且变量名一致）；
-- 录音目录要让中间件读得到：同机部署时把 FreeSWITCH 录音目录以只读卷挂进 bridge 容器（见 `deploy/docker-compose.yml` 的注释），或让 `recording_url` 指向 FusionPBX 的录音下载地址。
+- 用 JSON 不用 XML：中间件 `/cdr` 直接读 JSON；`log-b-leg=false`
+  只发主叫（A）腿的话单，队列的坐席腿不会到中间件，避免重复建单。
+- json_cdr 发不了自定义请求头，所以密钥放 URL 的 `?secret=` 里
+  （只走本机回环，密钥与 `.env` 文件同机）。
+- 每通 CDR 的 `uuid` 就是 CallID，中间件以它做幂等键。
+- 录音目录与中间件共享：FreeSWITCH 录到 `/recordings`（宿主机
+  `recordings/`），中间件按文件名在同一目录找录音挂到工单上。
+- 语音留言腿另有 `bridge_voicemail=1` 标记，话单只记统计，
+  工单由留言专线负责建（见 §4），两边顺序不影响结果。
 
-## 3. IVR 菜单（对应需求清单）
+## 3. 队列与接听策略
 
-在 FusionPBX「IVR Menus」新建菜单 `bike-hotline`，提示音文案：
-「欢迎致电 XX 自行车客服，故障报修请按 1，投诉建议请按 2，业务咨询请按 3，其他请按 4。」
+`conf-templates/callcenter.conf.xml`：队列名「客服队列」，策略
+`round-robin`（轮流接听）。另外两种策略改一个词就行：
 
-| 按键 | 去向（队列） | 中间件落单组 |
-|---|---|---|
-| 1 | 报修队列 | 报修组 / 类型=故障报修 |
-| 2 | 投诉队列 | 投诉组 / 类型=投诉建议 |
-| 3 | 咨询队列 | 咨询组 / 类型=业务咨询 |
-| 4 | 综合队列 | 客服组 / 类型=其他 |
-| 超时/无效 | 综合队列 | 客服组 |
+| 策略 | strategy 值 |
+|---|---|
+| 轮流接听 | `round-robin` |
+| 最久空闲优先 | `longest-idle-agent` |
+| 总量最少优先 | `agent-with-fewest-calls` |
 
-队列在「Call Centers」里建：策略先用 Ring All/空闲优先试跑，坐席 5 名逐一添加并设置登录/置忙状态操作方式，写进坐席手册。
+坐席状态用 fs_cli 管（见 §6）：`Available` 接单、`Logged Out` 摘机。
+以后要的「指定一人接听」就是队列里只留那一个坐席 Available。
 
 ## 4. 语音留言（客户在用的功能，必须有）
 
-老系统有语音留言：无人接听/非工作时间，客户留言后坐席在「语音留言列表」里听录音处理。
-新系统的做法：留言同样变成一张工单（类型=语音留言、组=客服组、留言录音作附件），
-坐席在 Zammad 左侧概览「语音留言」里集中处理（字段脚本自动建这个概览）。
+队列 60 秒无人接听 → 转 8009 留言分机：接通、录音
+（最长 300 秒、静音 5 秒停），挂机钩子 `zammad_voicemail.lua`
+向中间件发 `POST /events/voicemail`，带 `X-Bridge-Secret`：
 
-FreeSWITCH 侧接法（队列无人接听或非工作时间时转留言）：
+```json
+{"uuid": "通道uuid", "caller_id_number": "主叫",
+ "destination_number": "8009", "billsec": "留言秒数",
+ "duration": "总秒数", "start_epoch": "开始时间戳",
+ "recording_path": "uuid.wav"}
+```
 
-1. 拨号计划在进队列前设置：`recordings_dir`（与中间件共享的录音目录）、
-   队列振铃超时后执行 `playback` 留言提示音，然后
-   `record ${recordings_dir}/${uuid}.wav 300 200`（最长 300 秒录留言）；
-2. 通道挂机后由 Lua 钩子（或一个专门的 hangup 拨号计划动作）向中间件发：
-   `POST http://127.0.0.1:8890/events/voicemail`，带请求头 `X-Bridge-Secret`，
-   JSON 体：`{"uuid": 通道uuid, "caller_id_number": 主叫, "destination_number": "400...", "billsec": 留言秒数, "duration": 总秒数, "start_epoch": 开始时间戳, "recording_path": "${uuid}.wav"}`；
-3. 中间件按 uuid 幂等建单，重复投递不会重复建单；留言工单同样带回头客
-   「历史提示」（按主叫号码统计历史问题关键词）。
+中间件按 uuid 幂等建单（类型=语音留言、组=客服组、留言录音作
+附件），坐席在 Zammad 左侧概览「语音留言」里集中处理。
+不用 mod_voicemail：留言存在自己的库里还要再同步，不如
+「录音文件 + 中间件入线」直接。
 
-也可以用 mod_voicemail 做信箱，但它的留言存在自己的库里、还要再同步，
-不如上面「录音文件 + 中间件入线」直接。试跑阶段优先用上面的方式。
+## 5. 安全组与软电话
 
-## 5. SIP 中继与安全组提醒
+云安全组放行（入方向）：
+- UDP 5060（SIP 信令；接 400 中继后可收紧到中继 IP）
+- UDP 16384–16884（RTP 媒体；配置里已收窄，不是默认的 3 万多端口）
 
-- 云安全组放行：5060 UDP/TCP（SIP 信令，按运营商要求可只对中继 IP 放行）、16384–32768 UDP（RTP 媒体）、443/80（FusionPBX 管理与录音下载，仅限办公 IP）、8899（Zammad）、8890（中间件：/test 测试页与事件接口，POST 均需 X-Bridge-Secret 密钥）。
-- vars.xml 里 `external_rtp_ip` / `external_sip_ip` 填云主机公网 IP，避免接通无声。
+软电话配置：服务器 36.139.118.227、账号 8001–8005、密码见
+服务器上 `/opt/bike-callcenter/freeswitch/extensions.txt`、
+传输 UDP、编码 PCMA/PCMU。事件端口 8021 只绑 127.0.0.1，
+不要在安全组放行（fs_cli 只在服务器本机用）。
+
+## 6. 怎么看话务层（没有网页）
+
+FreeSWITCH 没有网页管理面，状态都在服务器命令行看：
+
+```bash
+cd /opt/bike-callcenter/deploy
+docker compose exec freeswitch fs_cli -p $(cat /opt/bike-callcenter/freeswitch/esl-password.txt)
+```
+
+进去以后常用命令：
+
+```
+status                    # 运行状态与当前通话数
+show calls                # 实时通话
+show channels             # 实时通道
+sofia status              # SIP profile 与注册情况
+sofia status profile internal reg   # 哪些分机已注册
+callcenter_config queue list        # 队列与等待情况
+callcenter_config agent list        # 坐席状态
+```
+
+容器日志：`docker compose logs -f freeswitch`。
+业务侧的通话记录照样在 Zammad 通话日志和中间件统计
+（`/stats/daily`、Excel 导出）里看。
+
+## 7. 已知待验证点（内部测试就是用来验这些的）
+
+- `execute_on_answer` 在队列接通时是否触发：若不触发，工单会
+  晚到挂机时才由 CDR 建（看板不弹），那时把队列拨号计划改回
+  直桥振铃（ring-all）方案。
+- 提示音：队列等待音目前是单音 beep，不是语音；正式上线前换
+  成录好的中文提示音文件。
+- 400 中继参数到齐后补网关配置与 DID 路由，队列与工单不动。

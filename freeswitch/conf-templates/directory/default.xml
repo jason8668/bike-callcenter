@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<include>
+  <domain name="$${domain}">
+    <params>
+      <param name="dial-string" value="{presence_id=${dialed_user}@${dialed_domain}}${sofia_contact(${dialed_user}@${dialed_domain})}"/>
+    </params>
+    <variables>
+      <variable name="user_context" value="default"/>
+    </variables>
+    <groups>
+      <group name="default">
+        <users>
+          <X-PRE-PROCESS cmd="include" data="default/*.xml"/>
+        </users>
+      </group>
+    </groups>
+  </domain>
+</include>

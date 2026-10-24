@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<configuration name="acl.conf" description="Network Lists">
+  <network-lists>
+    <list name="lan" default="deny">
+      <node type="allow" cidr="192.168.0.0/16"/>
+      <node type="allow" cidr="10.0.0.0/8"/>
+      <node type="allow" cidr="172.16.0.0/12"/>
+    </list>
+    <list name="localnet.auto" default="deny">
+      <node type="allow" cidr="127.0.0.0/8"/>
+      <node type="allow" cidr="192.168.0.0/16"/>
+      <node type="allow" cidr="10.0.0.0/8"/>
+      <node type="allow" cidr="172.16.0.0/12"/>
+    </list>
+    <list name="loopback.auto" default="deny">
+      <node type="allow" cidr="127.0.0.0/8"/>
+    </list>
+    <list name="rfc1918.auto" default="deny">
+      <node type="allow" cidr="192.168.0.0/16"/>
+      <node type="allow" cidr="10.0.0.0/8"/>
+      <node type="allow" cidr="172.16.0.0/12"/>
+    </list>
+  </network-lists>
+</configuration>

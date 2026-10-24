@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<profile name="internal">
+  <settings>
+    <!-- Binds the host interfaces (host networking); the public IP is
+         NAT'd 1:1 to the host, so ext-* tells remote phones where to
+         send media back. Without these, answered calls have no audio. -->
+    <param name="sip-ip" value="$${local_ip_v4}"/>
+    <param name="ext-sip-ip" value="36.139.118.227"/>
+    <param name="rtp-ip" value="$${local_ip_v4}"/>
+    <param name="ext-rtp-ip" value="36.139.118.227"/>
+    <param name="sip-port" value="5060"/>
+    <param name="dialplan" value="XML"/>
+    <param name="context" value="default"/>
+    <param name="auth-calls" value="true"/>
+    <param name="force-register-domain" value="36.139.118.227"/>
+    <param name="aggressive-nat-detection" value="true"/>
+    <param name="local-network-acl" value="localnet.auto"/>
+    <param name="inbound-codec-prefs" value="PCMA,PCMU"/>
+    <param name="outbound-codec-prefs" value="PCMA,PCMU"/>
+    <param name="inbound-codec-negotiation" value="generous"/>
+    <param name="dtmf-type" value="rfc2833"/>
+    <param name="rtp-timer-name" value="soft"/>
+    <param name="manage-presence" value="false"/>
+    <param name="nonce-ttl" value="60"/>
+    <param name="auth-all-packets" value="false"/>
+  </settings>
+  <gateways>
+  </gateways>
+  <domains>
+    <domain name="$${domain}" parse="true"/>
+    <domain name="all" alias="true" parse="false"/>
+  </domains>
+</profile>

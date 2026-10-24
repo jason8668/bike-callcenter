@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<configuration name="sofia.conf" description="sofia Endpoint">
+  <profiles>
+    <X-PRE-PROCESS cmd="include" data="sofia/internal.xml"/>
+  </profiles>
+</configuration>
