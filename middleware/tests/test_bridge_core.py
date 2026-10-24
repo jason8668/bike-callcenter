@@ -17,12 +17,16 @@ class FakeTransport:
 
     def __call__(self, method, url, headers, body):
         self.calls.append((method, url, headers, body))
-        if url.endswith("/api/v1/users/search?query=login:phone-customer"):
-            return 200, b"[]"
+        if url.endswith("/api/v1/roles"):
+            return 200, json.dumps([{"id": 3, "name": "Admin"},
+                                    {"id": 4, "name": "Agent"}]).encode()
         if url.endswith("/api/v1/users?limit=100"):
-            return 200, b"[]"
+            return 200, json.dumps(
+                [{"id": 5, "login": "jason", "role_ids": [3]}]).encode()
+        if url.endswith("/api/v1/groups"):
+            return 200, json.dumps([{"id": 11, "name": "客服组"}]).encode()
         if url.endswith("/api/v1/users") and method == "POST":
-            return 201, json.dumps({"id": 9}).encode()
+            return 201, json.dumps({"id": 77}).encode()
         if "/api/v1/tickets/" in url and method == "GET":
             # Ticket 101 (the first created) already has an agent-filled
             # fault type, like a real returning caller's old ticket.
@@ -90,19 +94,33 @@ class TestBridge(unittest.TestCase):
         ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
         self.assertEqual(len(ticket_posts), 1)
 
-    def test_different_callers_share_one_phone_customer(self):
-        """No per-caller user accounts: two numbers file under the same
-        shared phone customer, created only once."""
+    def test_different_callers_share_one_ticket_customer(self):
+        """No caller accounts at all: two numbers file under the first
+        admin user, and no user is ever created for a caller."""
         self.bridge.handle_cdr(CDR)
         self.bridge.handle_cdr({**CDR, "uuid": "other-1",
                                 "caller_id_number": "13900000000"})
         ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
         self.assertEqual(len(ticket_posts), 2)
         for c in ticket_posts:
-            self.assertEqual(json.loads(c[3])["customer_id"], 9)
+            self.assertEqual(json.loads(c[3])["customer_id"], 5)
         user_posts = [c for c in self.transport.calls
                       if c[1].endswith("/api/v1/users") and c[0] == "POST"]
-        self.assertEqual(len(user_posts), 1)
+        self.assertEqual(len(user_posts), 0)
+
+    def test_configured_customer_id_wins(self):
+        """An explicit TICKET_CUSTOMER_ID skips the admin lookup."""
+        transport = FakeTransport()
+        zammad = ZammadClient("http://zammad.local", "tok", transport=transport,
+                              cti_token=None, ticket_customer_id=9)
+        bridge = Bridge(zammad=zammad,
+                        store=CallStore(os.path.join(tempfile.mkdtemp(), "b.db")),
+                        recording_reader=lambda rec: b"RIFF-fake-wav" if rec.recording_path else None)
+        bridge.handle_cdr(CDR)
+        ticket_posts = [c for c in transport.calls if c[1].endswith("/api/v1/tickets")]
+        self.assertEqual(json.loads(ticket_posts[0][3])["customer_id"], 9)
+        role_calls = [c for c in transport.calls if c[1].endswith("/api/v1/roles")]
+        self.assertEqual(len(role_calls), 0)
 
     def test_answer_event_opens_ticket_during_call(self):
         """The ticket exists at answer time (no recording yet), so the
@@ -205,6 +223,35 @@ class TestVoicemail(unittest.TestCase):
         ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
         self.assertEqual(len(ticket_posts), 1)
 
+
+
+
+class TestCreateAgent(unittest.TestCase):
+    def setUp(self):
+        self.transport = FakeTransport()
+        self.zammad = ZammadClient("http://zammad.local", "tok",
+                                   transport=self.transport, cti_token=None)
+
+    def test_create_agent_from_login_and_password(self):
+        """Agent account from just login + password: firstname=login,
+        Agent role, full access to 客服组."""
+        user_id, err = self.zammad.create_agent("agent1", "pw123456")
+        self.assertEqual(err, "")
+        self.assertEqual(user_id, 77)
+        posts = [c for c in self.transport.calls
+                 if c[1].endswith("/api/v1/users") and c[0] == "POST"]
+        self.assertEqual(len(posts), 1)
+        payload = json.loads(posts[0][3])
+        self.assertEqual(payload["login"], "agent1")
+        self.assertEqual(payload["firstname"], "agent1")
+        self.assertEqual(payload["password"], "pw123456")
+        self.assertEqual(payload["roles"], ["Agent"])
+        self.assertEqual(payload["group_ids"], {"11": "full"})
+
+    def test_create_agent_existing_login(self):
+        user_id, err = self.zammad.create_agent("jason", "pw123456")
+        self.assertIsNone(user_id)
+        self.assertEqual(err, "exists")
 
 class TestHistoryHint(unittest.TestCase):
     def test_summarize_history(self):

@@ -261,11 +261,15 @@ def summarize_history(tickets: list) -> str:
 
 class ZammadClient:
     def __init__(self, base_url: str, token: str, transport: Transport = urllib_transport,
-                 cti_token: str = ""):
+                 cti_token: str = "", ticket_customer_id: Optional[int] = None):
         self.base = base_url.rstrip("/")
         self.token = token
         self.cti_token = cti_token
         self.transport = transport
+        # Explicit override for the user filed as customer on phone
+        # tickets (env TICKET_CUSTOMER_ID); normally auto-resolved to
+        # the first admin user by ticket_customer_id().
+        self._configured_customer_id = ticket_customer_id
         # Last ticket-create failure, surfaced to the test page so a failed
         # simulate shows Zammad's real reason (status + message) instead of
         # a generic "create failed". Contains no credentials.
@@ -298,46 +302,72 @@ class ZammadClient:
             {"Content-Type": "application/json"}, body,
         )[0], {}
 
-    # -- customers ------------------------------------------------------------
-    # Phone tickets do NOT get a user account per caller (operator ruling):
-    # every phone ticket is filed under one shared "phone customer", and
-    # the real caller number lives on the ticket (title + article). This
-    # also avoids the duplicate-account trap: Zammad's user search does
-    # not match on phone, so a per-caller lookup created a new user on
-    # every call instead of finding the old one.
-    PHONE_CUSTOMER_LOGIN = "phone-customer"
+    # -- ticket customer ------------------------------------------------------
+    # Phone tickets get NO customer account at all (operator ruling: only
+    # 系统管理 and 客服坐席 accounts exist). Zammad still requires a
+    # customer_id on every ticket, so phone tickets are filed under the
+    # first admin user (the account that owns the bridge token) and the
+    # real caller number lives on the ticket (title + article). Nothing
+    # is ever created in the user list for a caller.
 
-    def phone_customer_id(self) -> Optional[int]:
-        """Id of the shared phone customer, resolved once and cached.
-
-        Resolution order: search by login, scan the user list, create.
-        Best-effort: any failure yields None (ticket creation still
-        proceeds; Zammad then files the ticket under the API user)."""
-        if getattr(self, "_phone_customer_id", None):
-            return self._phone_customer_id
-        found = None
-        status, data = self._call(
-            "GET",
-            "/api/v1/users/search?query=login:" + self.PHONE_CUSTOMER_LOGIN)
-        if status == 200 and isinstance(data, list) and data:
-            found = data[0].get("id")
-        if not found:
-            status, data = self._call("GET", "/api/v1/users?limit=100")
-            if status == 200 and isinstance(data, list):
-                for user in data:
-                    if isinstance(user, dict) and user.get("login") == self.PHONE_CUSTOMER_LOGIN:
-                        found = user.get("id")
-                        break
-        if not found:
-            status, data = self._call("POST", "/api/v1/users", {
-                "login": self.PHONE_CUSTOMER_LOGIN,
-                "firstname": "电话客户", "roles": ["Customer"],
-            })
-            if status in (200, 201) and isinstance(data, dict):
-                found = data.get("id")
+    def ticket_customer_id(self) -> Optional[int]:
+        """User id filed as customer on phone tickets, cached after the
+        first resolution: explicit TICKET_CUSTOMER_ID if configured,
+        else the first non-system admin user found via the API."""
+        if getattr(self, "_ticket_customer_id", None):
+            return self._ticket_customer_id
+        found = self._configured_customer_id or self._first_admin_id()
         if found:
-            self._phone_customer_id = found
+            self._ticket_customer_id = found
         return found
+
+    def _first_admin_id(self) -> Optional[int]:
+        status, roles = self._call("GET", "/api/v1/roles")
+        admin_id = None
+        if status == 200 and isinstance(roles, list):
+            for r in roles:
+                if isinstance(r, dict) and r.get("name") == "Admin":
+                    admin_id = r.get("id")
+                    break
+        if not admin_id:
+            return None
+        status, users = self._call("GET", "/api/v1/users?limit=100")
+        if status == 200 and isinstance(users, list):
+            for u in users:
+                if not isinstance(u, dict) or u.get("id") == 1:
+                    continue
+                if admin_id in (u.get("role_ids") or []):
+                    return u.get("id")
+        return None
+
+    # -- agent accounts -------------------------------------------------------
+    def create_agent(self, login: str, password: str) -> tuple[Optional[int], str]:
+        """Create an agent account from just a login + password (no
+        first/last-name split): firstname=login, Agent role, full access
+        to 客服组. Returns (user_id, error_message); error "exists" when
+        the login is already taken."""
+        status, users = self._call("GET", "/api/v1/users?limit=100")
+        if status == 200 and isinstance(users, list):
+            for u in users:
+                if isinstance(u, dict) and u.get("login") == login:
+                    return None, "exists"
+        status, groups = self._call("GET", "/api/v1/groups")
+        group_id = None
+        if status == 200 and isinstance(groups, list):
+            for g in groups:
+                if isinstance(g, dict) and g.get("name") == "客服组":
+                    group_id = g.get("id")
+                    break
+        if not group_id:
+            return None, "客服组 not found"
+        status, data = self._call("POST", "/api/v1/users", {
+            "login": login, "firstname": login, "lastname": "",
+            "password": password, "roles": ["Agent"],
+            "group_ids": {str(group_id): "full"},
+        })
+        if status in (200, 201) and isinstance(data, dict) and data.get("id"):
+            return data["id"], ""
+        return None, f"HTTP {status}: {str(data)[:200]}"
 
     def get_ticket(self, ticket_id: int) -> Optional[dict]:
         """One ticket as Zammad returns it (custom attributes included)."""
@@ -498,7 +528,7 @@ class Bridge:
         yet); the CDR attaches the recording afterwards."""
         recording = self.recording_reader(rec)
         filename = os.path.basename(rec.recording_path) if rec.recording_path else ""
-        customer_id = self.zammad.phone_customer_id()
+        customer_id = self.zammad.ticket_customer_id()
         # Returning caller: past tickets are found by caller NUMBER in
         # the bridge's own call log (not by customer account, since all
         # phone tickets share one customer), so the agent still sees this

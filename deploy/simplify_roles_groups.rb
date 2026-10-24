@@ -38,6 +38,14 @@ demo_users.each do |u|
     puts "will delete demo user: #{u.login} (id=#{u.id}) #{u.email}"
   end
 end
+phone_customer = User.find_by(login: 'phone-customer')
+if phone_customer
+  if Ticket.where(customer_id: phone_customer.id).exists?
+    puts "skip (has tickets): phone-customer user (id=#{phone_customer.id})"
+  else
+    puts "will delete obsolete shared phone-customer user (id=#{phone_customer.id})"
+  end
+end
 org = Organization.find_by(name: 'Zammad Foundation')
 puts 'will delete organization: Zammad Foundation (if member-free)' if org
 puts 'NOTE: roles stay (Admin/Agent/Customer); Customer is only used by the shared phone-customer account.'
@@ -59,6 +67,11 @@ demo_users.each do |u|
   deleted_users += 1
 end
 puts "deleted #{deleted_users} demo users"
+phone_customer = User.find_by(login: 'phone-customer')
+if phone_customer && !Ticket.where(customer_id: phone_customer.id).exists?
+  phone_customer.destroy
+  puts 'deleted obsolete shared phone-customer user'
+end
 org = Organization.find_by(name: 'Zammad Foundation')
 if org && org.members.empty?
   org.destroy

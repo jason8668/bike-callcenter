@@ -42,8 +42,11 @@ def read_recording(rec) -> bytes | None:
     return None
 
 
+_TICKET_CUSTOMER_ID = os.environ.get("TICKET_CUSTOMER_ID", "")
 bridge = Bridge(
-    zammad=ZammadClient(ZAMMAD_URL, ZAMMAD_TOKEN, cti_token=ZAMMAD_CTI_TOKEN),
+    zammad=ZammadClient(
+        ZAMMAD_URL, ZAMMAD_TOKEN, cti_token=ZAMMAD_CTI_TOKEN,
+        ticket_customer_id=int(_TICKET_CUSTOMER_ID) if _TICKET_CUSTOMER_ID.isdigit() else None),
     store=CallStore(DB_PATH),
     recording_reader=read_recording,
 )
@@ -419,3 +422,116 @@ async def simulate_voicemail(request: Request, x_bridge_secret: str | None = Hea
         "destination_number": "4008000000", "direction": "inbound",
         "billsec": "8", "duration": "25",
         "start_epoch": int(time.time()), "recording_path": filename})
+
+
+AGENTS_PAGE_HTML = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>新建客服坐席 - 自行车客服系统</title>
+<style>
+  body { font-family: sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  label { display: block; margin-top: 16px; font-weight: bold; }
+  input { width: 100%; padding: 10px; margin-top: 6px; font-size: 16px; box-sizing: border-box; }
+  button { width: 100%; padding: 14px; margin-top: 24px; font-size: 17px; color: #fff;
+           background: #1a7a4a; border: 0; border-radius: 8px; cursor: pointer; }
+  button:disabled { background: #999; }
+  .hint { color: #666; font-size: 13px; line-height: 1.6; }
+  #result { display: none; margin-top: 20px; padding: 14px; border-radius: 8px; font-size: 15px; }
+  #result.ok { display: block; background: #e6f4ea; }
+  #result.err { display: block; background: #fce8e6; }
+</style>
+</head>
+<body>
+<h1>新建客服坐席</h1>
+<p class="hint">只需要账号和密码：新账号就是客服坐席角色、客服组成员，建好就能在客服系统
+（端口 8899 的页面）用这个账号和密码直接登录。姓、名不用分开填，账号就是名字。</p>
+
+<label>账号（用户名）</label>
+<input id="login" placeholder="比如：zhangsan">
+
+<label>密码</label>
+<input id="password" type="password" placeholder="建议 8 位以上">
+
+<label>确认密码</label>
+<input id="confirm" type="password" placeholder="再输一次密码">
+
+<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
+<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
+
+<button id="go">创建坐席账号</button>
+<div id="result"></div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
+  if (saved) document.getElementById("secret").value = saved;
+  document.getElementById("go").addEventListener("click", async () => {
+    const btn = document.getElementById("go");
+    const box = document.getElementById("result");
+    const login = document.getElementById("login").value.trim();
+    const password = document.getElementById("password").value;
+    const confirm = document.getElementById("confirm").value;
+    const secret = document.getElementById("secret").value.trim();
+    localStorage.setItem("bridge_secret", secret);
+    if (!login || !password) {
+      box.style.display = "block"; box.className = "err";
+      box.textContent = "账号和密码都要填。";
+      return;
+    }
+    if (password !== confirm) {
+      box.style.display = "block"; box.className = "err";
+      box.textContent = "两次密码不一致，请重新输入。";
+      return;
+    }
+    btn.disabled = true; btn.textContent = "正在创建...";
+    box.style.display = "none";
+    try {
+      const resp = await fetch("/agents", {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "X-Bridge-Secret": secret},
+        body: JSON.stringify({login: login, password: password})
+      });
+      const data = await resp.json();
+      box.style.display = "block";
+      if (resp.ok && data.ok) {
+        box.className = "ok";
+        box.textContent = "已创建客服坐席：" + data.login +
+          "，请用这个账号和密码登录客服系统（端口 8899）。";
+      } else {
+        box.className = "err";
+        box.textContent = "创建失败：" +
+          (data.error === "exists" ? "这个账号已经存在，换一个账号再试。"
+                                   : (data.error || JSON.stringify(data)));
+      }
+    } catch (e) {
+      box.style.display = "block"; box.className = "err";
+      box.textContent = "请求失败：" + e;
+    }
+    btn.disabled = false; btn.textContent = "创建坐席账号";
+  });
+</script>
+</body></html>
+"""
+
+
+@app.get("/agents", response_class=HTMLResponse)
+def agents_page():
+    """Simple agent-account creation page: login + password only."""
+    return AGENTS_PAGE_HTML
+
+
+@app.post("/agents")
+async def create_agent_account(request: Request, x_bridge_secret: str | None = Header(default=None)):
+    """Create an agent account from just a login + password (secret-protected)."""
+    check_secret(x_bridge_secret)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    login = str((body or {}).get("login") or "").strip()
+    password = str((body or {}).get("password") or "")
+    if not login or not password:
+        return {"ok": False, "error": "login and password are required"}
+    user_id, err = bridge.zammad.create_agent(login, password)
+    if user_id is None:
+        return {"ok": False, "error": "账号已存在" if err == "exists" else err}
+    return {"ok": True, "login": login, "user_id": user_id}
