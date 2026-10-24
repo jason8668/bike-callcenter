@@ -106,7 +106,7 @@ def ensure_attribute(name, display, data_type, data_option, obj="Ticket"):
 def ensure_voicemail_overview():
     """The 语音留言 overview = the legacy system's voicemail list:
     all tickets whose 工单类型 is 语音留言, newest first, visible to agents."""
-    status, data = call("GET", "/api/v1/ticket_overviews")
+    status, data = call("GET", "/api/v1/overviews")
     if status == 200 and isinstance(data, list) and \
             any(o.get("name") == "语音留言" for o in data):
         print("overview exists, skip: 语音留言")
@@ -123,7 +123,7 @@ def ensure_voicemail_overview():
         "view": {"d": ["title", "customer", "group", "state", "created_at"],
                  "s": ["title", "customer", "group", "state", "created_at"]},
     }
-    status, _ = call("POST", "/api/v1/ticket_overviews", payload)
+    status, _ = call("POST", "/api/v1/overviews", payload)
     print(f"overview 语音留言: HTTP {status}")
 
 
@@ -138,8 +138,9 @@ def main():
     status, _ = call("POST", "/api/v1/object_manager_attributes_execute_migrations")
     print(f"execute migrations: HTTP {status}")
     ensure_voicemail_overview()
-    print("Done. Now create the ticket states listed in this file's docstring"
-          " in Admin UI, and bind the SLA calendar.")
+    print("Done. (Ticket states/priorities were renamed by the cn_setup"
+          " script; the full custom state list from this file's docstring"
+          " remains optional Admin UI work.)")
 
 
 if __name__ == "__main__":
