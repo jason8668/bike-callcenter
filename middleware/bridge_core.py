@@ -411,6 +411,7 @@ class ZammadClient:
             "title": f"电话工单 {rec.caller} {rec.ticket_type}".strip(),
             "group": rec.group_name,
             "customer_id": customer_id,
+            "caller_number": rec.caller,
             "call_id": rec.call_id,
             "recording_url": rec.recording_url,
             "article": article,

@@ -84,6 +84,7 @@ class TestBridge(unittest.TestCase):
         self.assertEqual(len(ticket_posts), 1)
         payload = json.loads(ticket_posts[0][3])
         self.assertEqual(payload["call_id"], "abc-123")
+        self.assertEqual(payload["caller_number"], "13800000000")
         self.assertEqual(payload["group"], "报修组")
         self.assertIn("attachments", payload["article"])
 
