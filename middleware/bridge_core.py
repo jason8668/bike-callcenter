@@ -50,9 +50,13 @@ class CallRecord:
     agent: str = ""                # agent extension / number, if known
     hangup_cause: str = ""
 
-    # IVR digit -> ticket routing for the bicycle hotline
-    IVR_GROUP = {"1": "报修组", "2": "投诉组", "3": "咨询组", "4": "客服组"}
-    IVR_TYPE = {"1": "故障报修", "2": "投诉建议", "3": "业务咨询", "4": "其他"}
+    # IVR digit -> ticket routing for the bicycle hotline.
+    # "voicemail" is a pseudo choice set by the voicemail ingest path
+    # (caller left a message because nobody answered / after hours).
+    IVR_GROUP = {"1": "报修组", "2": "投诉组", "3": "咨询组", "4": "客服组",
+                 "voicemail": "客服组"}
+    IVR_TYPE = {"1": "故障报修", "2": "投诉建议", "3": "业务咨询", "4": "其他",
+                "voicemail": "语音留言"}
 
     @property
     def group_name(self) -> str:
@@ -312,6 +316,10 @@ class ZammadClient:
             "recording_url": rec.recording_url,
             "article": article,
         }
+        if rec.ticket_type:
+            # Also stamp the 工单类型 attribute (agents can still change it);
+            # voicemail tickets rely on it for the 语音留言 overview filter.
+            payload["ticket_type"] = rec.ticket_type
         status, data = self._call("POST", "/api/v1/tickets", payload)
         if status in (200, 201) and isinstance(data, dict):
             return data.get("id")
@@ -352,6 +360,24 @@ class Bridge:
         self.zammad.push_cti_event(event, rec)
         return {"ok": True, "call_id": rec.call_id, "event": event}
 
+    def _bind_ticket(self, rec: CallRecord) -> tuple[Optional[int], bool, str]:
+        """Create the Zammad ticket for an answered contact (call or
+        voicemail): recording attached, returning-caller keyword hint
+        stamped on top. Returns (ticket_id, recording_attached, hint)."""
+        recording = self.recording_reader(rec)
+        filename = os.path.basename(rec.recording_path) if rec.recording_path else ""
+        customer_id = self.zammad.find_or_create_customer(rec.caller)
+        # Returning caller: summarize past tickets into a keyword hint so
+        # the agent sees this customer's usual problems on the new ticket.
+        history_note = ""
+        try:
+            history_note = summarize_history(self.zammad.customer_history(customer_id))
+        except Exception:
+            history_note = ""
+        ticket_id = self.zammad.create_ticket_with_recording(
+            rec, customer_id, recording, filename, history_note=history_note)
+        return ticket_id, recording is not None, history_note
+
     def handle_cdr(self, payload: dict) -> dict:
         rec = parse_cdr(payload)
         if not rec.call_id:
@@ -368,21 +394,33 @@ class Bridge:
         if existing:
             return {"ok": True, "call_id": rec.call_id, "ticket_id": existing,
                     "note": "already bound"}
-        recording = self.recording_reader(rec)
-        filename = os.path.basename(rec.recording_path) if rec.recording_path else ""
-        customer_id = self.zammad.find_or_create_customer(rec.caller)
-        # Returning caller: summarize past tickets into a keyword hint so
-        # the agent sees this customer's usual problems on the new ticket.
-        history_note = ""
-        try:
-            history_note = summarize_history(self.zammad.customer_history(customer_id))
-        except Exception:
-            history_note = ""
-        ticket_id = self.zammad.create_ticket_with_recording(
-            rec, customer_id, recording, filename, history_note=history_note)
+        ticket_id, attached, history_note = self._bind_ticket(rec)
         if ticket_id is None:
             return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed"}
         self.store.record(rec, ticket_id)
         return {"ok": True, "call_id": rec.call_id, "ticket_id": ticket_id,
-                "recording_attached": recording is not None,
-                "history_hint": history_note}
+                "recording_attached": attached, "history_hint": history_note}
+
+    def handle_voicemail(self, payload: dict) -> dict:
+        """A caller left a voicemail (nobody answered / after hours).
+
+        The message becomes a ticket in 客服组 with type 语音留言 and the
+        message recording attached, so agents work it from the 语音留言
+        overview like the legacy system's voicemail list. Idempotent by
+        CallID, same as calls."""
+        rec = parse_cdr(payload)
+        if not rec.call_id:
+            return {"ok": False, "error": "missing call_id/uuid"}
+        rec.ivr_choice = "voicemail"
+        rec.answered = True  # a completed message is a handled contact
+        existing = self.store.get_ticket_id(rec.call_id)
+        if existing:
+            return {"ok": True, "call_id": rec.call_id, "ticket_id": existing,
+                    "note": "already bound", "voicemail": True}
+        ticket_id, attached, history_note = self._bind_ticket(rec)
+        if ticket_id is None:
+            return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed"}
+        self.store.record(rec, ticket_id)
+        return {"ok": True, "call_id": rec.call_id, "ticket_id": ticket_id,
+                "recording_attached": attached, "history_hint": history_note,
+                "voicemail": True}

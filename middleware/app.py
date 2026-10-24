@@ -78,6 +78,15 @@ async def cdr(request: Request, x_bridge_secret: str | None = Header(default=Non
     return bridge.handle_cdr(payload)
 
 
+@app.post("/events/voicemail")
+async def voicemail_event(request: Request, x_bridge_secret: str | None = Header(default=None)):
+    """Ingest one finished voicemail (posted by the FreeSWITCH hangup hook
+    once telephony is live): creates the 语音留言 ticket with recording."""
+    check_secret(x_bridge_secret)
+    payload = await request.json()
+    return bridge.handle_voicemail(payload)
+
+
 @app.get("/stats/daily")
 def daily(date: str):
     return bridge.store.daily_stats(date)
@@ -97,7 +106,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
   button { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px;
            background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
   button:disabled { background: #999; }
-  #result { margin-top: 18px; padding: 12px; border-radius: 6px; display: none; font-size: 14px; }
+  #result, #vm_result { margin-top: 18px; padding: 12px; border-radius: 6px; display: none; font-size: 14px; }
   .ok { background: #e6f4ea; border: 1px solid #34a853; }
   .err { background: #fdecea; border: 1px solid #d93025; }
   .hint { color: #666; font-size: 13px; line-height: 1.6; }
@@ -127,6 +136,16 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 
 <p class="hint">操作顺序：先打开并登录客服系统（端口 8899 的页面）并保持页面开着，
 再回到本页点按钮，然后切回客服系统页面看弹屏和新工单。</p>
+
+<hr>
+<h1>模拟语音留言</h1>
+<p class="hint">模拟客户在无人接听时留了一条语音留言：系统会生成一张「语音留言」工单
+（在客服组），留言录音作为附件绑在工单上。坐席在客服系统左侧概览「语音留言」里处理。</p>
+
+<label>留言客户手机号码</label>
+<input id="vm_caller" value="13900000000">
+<button id="vm_go">模拟留一条语音留言</button>
+<div id="vm_result"></div>
 
 <script>
   const params = new URLSearchParams(location.search);
@@ -166,6 +185,39 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       box.textContent = "请求失败：" + e;
     }
     btn.disabled = false; btn.textContent = "发起模拟来电";
+  });
+
+  document.getElementById("vm_go").addEventListener("click", async () => {
+    const btn = document.getElementById("vm_go");
+    const box = document.getElementById("vm_result");
+    const secret = document.getElementById("secret").value.trim();
+    localStorage.setItem("bridge_secret", secret);
+    btn.disabled = true; btn.textContent = "正在生成留言...";
+    box.style.display = "none";
+    try {
+      const resp = await fetch("/simulate/voicemail", {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "X-Bridge-Secret": secret},
+        body: JSON.stringify({
+          caller_id_number: document.getElementById("vm_caller").value.trim()
+        })
+      });
+      const data = await resp.json();
+      box.style.display = "block";
+      if (resp.ok && data.ticket_id) {
+        const link = "http://" + location.hostname + ":8899/#ticket/zoom/" + data.ticket_id;
+        box.className = "ok";
+        box.innerHTML = "语音留言工单已生成（编号 " + data.ticket_id +
+          "）。<br><a href=\"" + link + "\" target=\"_blank\">点这里打开这张留言工单</a>";
+      } else {
+        box.className = "err";
+        box.textContent = "没有生成留言工单：" + JSON.stringify(data);
+      }
+    } catch (e) {
+      box.style.display = "block"; box.className = "err";
+      box.textContent = "请求失败：" + e;
+    }
+    btn.disabled = false; btn.textContent = "模拟留一条语音留言";
   });
 </script>
 </body>
@@ -223,3 +275,41 @@ async def simulate(request: Request, x_bridge_secret: str | None = Header(defaul
     bridge.handle_event("answer", base)
     return bridge.handle_cdr({**base, "billsec": "65", "duration": "75",
                               "recording_path": filename})
+
+
+@app.post("/simulate/voicemail")
+async def simulate_voicemail(request: Request, x_bridge_secret: str | None = Header(default=None)):
+    """Trial helper: one fake voicemail, end to end, no real phone line.
+
+    Writes a 3-second silent WAV as the "message", then feeds the
+    voicemail ingest path so a 语音留言 ticket with the recording
+    attached should appear in 客服组."""
+    check_secret(x_bridge_secret)
+    import struct
+    import time
+    import uuid as uuidlib
+    import wave
+
+    overrides: dict = {}
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            overrides = body
+    except Exception:
+        pass
+    caller = str(overrides.get("caller_id_number") or "13900000000")
+
+    call_id = str(uuidlib.uuid4())
+    filename = f"{call_id}.wav"
+    path = os.path.join(RECORDING_DIR, filename)
+    os.makedirs(RECORDING_DIR, exist_ok=True)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        w.writeframes(b"".join(struct.pack("<h", 0) for _ in range(8000 * 3)))
+    return bridge.handle_voicemail({
+        "uuid": call_id, "caller_id_number": caller,
+        "destination_number": "4008000000", "direction": "inbound",
+        "billsec": "8", "duration": "25",
+        "start_epoch": int(time.time()), "recording_path": filename})

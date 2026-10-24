@@ -15,7 +15,7 @@
 ```xml
 <configuration name="xml_cdr.conf" description="XML CDR">
   <settings>
-    <param name="url" value="http://127.0.0.1:8090/cdr"/>
+    <param name="url" value="http://127.0.0.1:8890/cdr"/>
     <param name="encode" value="base64"/>
     <!-- 用自定义头带密钥时改为在中间件同机部署、用内网地址+防火墙收口；
          如xml_cdr版本支持headers参数，再加 X-Bridge-Secret -->
@@ -45,7 +45,27 @@
 
 队列在「Call Centers」里建：策略先用 Ring All/空闲优先试跑，坐席 5 名逐一添加并设置登录/置忙状态操作方式，写进坐席手册。
 
-## 4. SIP 中继与安全组提醒
+## 4. 语音留言（客户在用的功能，必须有）
 
-- 云安全组放行：5060 UDP/TCP（SIP 信令，按运营商要求可只对中继 IP 放行）、16384–32768 UDP（RTP 媒体）、443/80（FusionPBX 管理与录音下载，仅限办公 IP）、8080（Zammad，仅限办公 IP）、8090（中间件，只绑 127.0.0.1 不对外）。
+老系统有语音留言：无人接听/非工作时间，客户留言后坐席在「语音留言列表」里听录音处理。
+新系统的做法：留言同样变成一张工单（类型=语音留言、组=客服组、留言录音作附件），
+坐席在 Zammad 左侧概览「语音留言」里集中处理（字段脚本自动建这个概览）。
+
+FreeSWITCH 侧接法（队列无人接听或非工作时间时转留言）：
+
+1. 拨号计划在进队列前设置：`recordings_dir`（与中间件共享的录音目录）、
+   队列振铃超时后执行 `playback` 留言提示音，然后
+   `record ${recordings_dir}/${uuid}.wav 300 200`（最长 300 秒录留言）；
+2. 通道挂机后由 Lua 钩子（或一个专门的 hangup 拨号计划动作）向中间件发：
+   `POST http://127.0.0.1:8890/events/voicemail`，带请求头 `X-Bridge-Secret`，
+   JSON 体：`{"uuid": 通道uuid, "caller_id_number": 主叫, "destination_number": "400...", "billsec": 留言秒数, "duration": 总秒数, "start_epoch": 开始时间戳, "recording_path": "${uuid}.wav"}`；
+3. 中间件按 uuid 幂等建单，重复投递不会重复建单；留言工单同样带回头客
+   「历史提示」（按主叫号码统计历史问题关键词）。
+
+也可以用 mod_voicemail 做信箱，但它的留言存在自己的库里、还要再同步，
+不如上面「录音文件 + 中间件入线」直接。试跑阶段优先用上面的方式。
+
+## 5. SIP 中继与安全组提醒
+
+- 云安全组放行：5060 UDP/TCP（SIP 信令，按运营商要求可只对中继 IP 放行）、16384–32768 UDP（RTP 媒体）、443/80（FusionPBX 管理与录音下载，仅限办公 IP）、8899（Zammad）、8890（中间件：/test 测试页与事件接口，POST 均需 X-Bridge-Secret 密钥）。
 - vars.xml 里 `external_rtp_ip` / `external_sip_ip` 填云主机公网 IP，避免接通无声。

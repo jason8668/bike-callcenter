@@ -45,7 +45,8 @@ ATTRIBUTES = [
     ("bike_no", "单车编号", "input", {"type": "text", "maxlength": 64}),
     ("ticket_type", "工单类型", "select",
      {"options": {"故障报修": "故障报修", "投诉建议": "投诉建议",
-                  "业务咨询": "业务咨询", "其他": "其他"}}),
+                  "业务咨询": "业务咨询", "语音留言": "语音留言",
+                  "其他": "其他"}}),
     ("fault_type", "服务类型", "select",
      {"options": {"还车异常": "还车异常", "借车异常": "借车异常",
                   "锁桩故障": "锁桩故障", "车辆损坏": "车辆损坏",
@@ -102,6 +103,30 @@ def ensure_attribute(name, display, data_type, data_option, obj="Ticket"):
     print(f"attribute {obj}.{name}: HTTP {status}")
 
 
+def ensure_voicemail_overview():
+    """The 语音留言 overview = the legacy system's voicemail list:
+    all tickets whose 工单类型 is 语音留言, newest first, visible to agents."""
+    status, data = call("GET", "/api/v1/ticket_overviews")
+    if status == 200 and isinstance(data, list) and \
+            any(o.get("name") == "语音留言" for o in data):
+        print("overview exists, skip: 语音留言")
+        return
+    status, roles = call("GET", "/api/v1/roles")
+    agent_ids = [r["id"] for r in roles if r.get("name") == "Agent"] \
+        if status == 200 and isinstance(roles, list) else []
+    payload = {
+        "name": "语音留言", "link": "voice_messages", "prio": 1100,
+        "active": True, "role_ids": agent_ids,
+        "conditions": {"ticket.ticket_type": {"operator": "is",
+                                              "value": "语音留言"}},
+        "order": {"by": "created_at", "direction": "DESC"},
+        "view": {"d": ["title", "customer", "group", "state", "created_at"],
+                 "s": ["title", "customer", "group", "state", "created_at"]},
+    }
+    status, _ = call("POST", "/api/v1/ticket_overviews", payload)
+    print(f"overview 语音留言: HTTP {status}")
+
+
 def main():
     for g in GROUPS:
         ensure_group(g)
@@ -112,6 +137,7 @@ def main():
     # ObjectManager changes only take effect after a DB migration run.
     status, _ = call("POST", "/api/v1/object_manager_attributes_execute_migrations")
     print(f"execute migrations: HTTP {status}")
+    ensure_voicemail_overview()
     print("Done. Now create the ticket states listed in this file's docstring"
           " in Admin UI, and bind the SLA calendar.")
 

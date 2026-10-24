@@ -110,6 +110,44 @@ class HistoryTransport(FakeTransport):
         return super().__call__(method, url, headers, body)
 
 
+VM = {
+    "uuid": "vm-123", "caller_id_number": "13900000000",
+    "destination_number": "4008000000", "billsec": "8", "duration": "25",
+    "start_epoch": "1792800000",
+    "recording_path": "/var/lib/freeswitch/recordings/vm-123.wav",
+}
+
+
+class TestVoicemail(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.transport = FakeTransport()
+        zammad = ZammadClient("http://zammad.local", "tok", transport=self.transport,
+                              cti_token="cti-tok")
+        self.bridge = Bridge(zammad=zammad,
+                             store=CallStore(os.path.join(self.tmp, "b.db")),
+                             recording_reader=lambda rec: b"RIFF-fake-wav")
+
+    def test_voicemail_creates_ticket_in_service_group(self):
+        out = self.bridge.handle_voicemail(VM)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["voicemail"])
+        self.assertTrue(out["recording_attached"])
+        ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
+        self.assertEqual(len(ticket_posts), 1)
+        payload = json.loads(ticket_posts[0][3])
+        self.assertEqual(payload["group"], "客服组")
+        self.assertEqual(payload["ticket_type"], "语音留言")
+        self.assertIn("attachments", payload["article"])
+
+    def test_voicemail_is_idempotent(self):
+        first = self.bridge.handle_voicemail(VM)
+        second = self.bridge.handle_voicemail(VM)
+        self.assertEqual(first["ticket_id"], second["ticket_id"])
+        ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
+        self.assertEqual(len(ticket_posts), 1)
+
+
 class TestHistoryHint(unittest.TestCase):
     def test_summarize_history(self):
         note = summarize_history(HistoryTransport.HISTORY)
