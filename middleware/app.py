@@ -5,11 +5,14 @@ Env: see .env.example. All secrets live in .env only, never in Git.
 """
 import os
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from bridge_core import Bridge, CallStore, ZammadClient, parse_cdr
+from export_xlsx import (CALL_COLUMNS, TICKET_COLUMNS, XLSX_MIME, build_xlsx,
+                         call_row, ticket_row)
 
 ZAMMAD_URL = os.environ.get("ZAMMAD_URL", "http://zammad-nginx:8080")
 ZAMMAD_TOKEN = os.environ.get("ZAMMAD_TOKEN", "")
@@ -92,6 +95,71 @@ def daily(date: str):
     return bridge.store.daily_stats(date)
 
 
+def _xlsx_response(data: bytes, filename: str) -> Response:
+    return Response(
+        content=data, media_type=XLSX_MIME,
+        headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@app.get("/export/tickets.xlsx")
+def export_tickets(days: int = 30, group: str = "", type: str = "",
+                   x_bridge_secret: str | None = Header(default=None)):
+    """Export the ticket list as .xlsx (mirrors the legacy system's 导出 Excel).
+
+    Query: days=30 (1..365), group=报修组 (optional), type=故障报修 (optional).
+    Columns: 工单号/标题/工单类型/服务类型/状态/优先级/分组/客户电话/
+    单车编号/服务地点/通话ID/录音地址/投诉等级/创建时间/更新时间.
+    """
+    check_secret(x_bridge_secret)
+    days = max(1, min(days, 365))
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    tickets: list = []
+    for page in range(1, 21):  # hard cap: 2000 tickets per export
+        batch = bridge.zammad.search_tickets(f"created_at:>{since}",
+                                             page=page, per_page=100)
+        if not batch:
+            break
+        tickets.extend(batch)
+        if len(batch) < 100:
+            break
+    state_map = bridge.zammad.id_name_map("/api/v1/ticket_states")
+    priority_map = bridge.zammad.id_name_map("/api/v1/ticket_priorities")
+    group_map = bridge.zammad.id_name_map("/api/v1/groups")
+    phone_map: dict = {}
+
+    def want(t: dict) -> bool:
+        if group and group_map.get(t.get("group_id")) != group:
+            return False
+        if type and str(t.get("ticket_type") or "") != type:
+            return False
+        return True
+
+    rows = []
+    for t in tickets:
+        if not want(t):
+            continue
+        uid = t.get("customer_id")
+        if uid and uid not in phone_map:
+            phone_map[uid] = bridge.zammad.get_user_phone(uid)
+        rows.append(ticket_row(t, state_map, priority_map, group_map, phone_map))
+    stamp = datetime.now().strftime("%Y%m%d")
+    return _xlsx_response(build_xlsx([("工单列表", TICKET_COLUMNS, rows)]),
+                          f"tickets_{stamp}.xlsx")
+
+
+@app.get("/export/calls.xlsx")
+def export_calls(days: int = 30,
+                 x_bridge_secret: str | None = Header(default=None)):
+    """Export call records (the bridge's SQLite CDR store) as .xlsx."""
+    check_secret(x_bridge_secret)
+    days = max(1, min(days, 365))
+    start = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    rows = [call_row(r) for r in bridge.store.list_calls(start)]
+    stamp = datetime.now().strftime("%Y%m%d")
+    return _xlsx_response(build_xlsx([("通话记录", CALL_COLUMNS, rows)]),
+                          f"calls_{stamp}.xlsx")
+
+
 TEST_PAGE_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -147,6 +215,18 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <button id="vm_go">模拟留一条语音留言</button>
 <div id="vm_result"></div>
 
+<hr>
+<h1>导出 Excel</h1>
+<p class="hint">把工单列表或通话记录导出成 Excel 表格（.xlsx），和老系统的「导出 Excel」对应：
+工单号、客户电话、服务类型、状态、通话ID、录音地址等字段都在里面。</p>
+
+<label>导出范围（最近多少天）</label>
+<input id="exp_days" value="30">
+
+<button id="exp_tickets">导出工单列表</button>
+<button id="exp_calls" style="background:#1a5fb4">导出通话记录</button>
+<div id="exp_result"></div>
+
 <script>
   const params = new URLSearchParams(location.search);
   const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
@@ -173,7 +253,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
         const link = "http://" + location.hostname + ":8899/#ticket/zoom/" + data.ticket_id;
         box.className = "ok";
         box.innerHTML = "模拟来电完成，工单已生成（编号 " + data.ticket_id +
-          "）。<br><a href=\"" + link + "\" target=\"_blank\">点这里打开这张工单</a>" +
+          "）。<br><a href='" + link + "' target='_blank'>点这里打开这张工单</a>" +
           "<br>录音已作为附件绑在工单上：" + (data.recording_attached ? "是" : "否");
       } else {
         box.className = "err";
@@ -208,7 +288,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
         const link = "http://" + location.hostname + ":8899/#ticket/zoom/" + data.ticket_id;
         box.className = "ok";
         box.innerHTML = "语音留言工单已生成（编号 " + data.ticket_id +
-          "）。<br><a href=\"" + link + "\" target=\"_blank\">点这里打开这张留言工单</a>";
+          "）。<br><a href='" + link + "' target='_blank'>点这里打开这张留言工单</a>";
       } else {
         box.className = "err";
         box.textContent = "没有生成留言工单：" + JSON.stringify(data);
@@ -219,6 +299,35 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
     }
     btn.disabled = false; btn.textContent = "模拟留一条语音留言";
   });
+
+  async function downloadXlsx(path, filename) {
+    const box = document.getElementById("exp_result");
+    const secret = document.getElementById("secret").value.trim();
+    localStorage.setItem("bridge_secret", secret);
+    const days = document.getElementById("exp_days").value.trim() || "30";
+    box.style.display = "none";
+    try {
+      const resp = await fetch(path + "?days=" + encodeURIComponent(days), {
+        headers: {"X-Bridge-Secret": secret}
+      });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const blob = await resp.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      box.style.display = "block"; box.className = "ok";
+      box.textContent = "导出成功，文件已开始下载。";
+    } catch (e) {
+      box.style.display = "block"; box.className = "err";
+      box.textContent = "导出失败：" + e + "（常见原因：密钥不对）";
+    }
+  }
+  document.getElementById("exp_tickets").addEventListener("click",
+    () => downloadXlsx("/export/tickets.xlsx", "tickets.xlsx"));
+  document.getElementById("exp_calls").addEventListener("click",
+    () => downloadXlsx("/export/calls.xlsx", "calls.xlsx"));
 </script>
 </body>
 </html>
