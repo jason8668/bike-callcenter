@@ -162,31 +162,48 @@ begin
   rescue StandardError
     []
   end
-  if token_cols.include?('label')
+  # Old bridge tokens are identified by label (Zammad 6.x) or by name
+  # (Zammad 7.x, where name is a display label); without either column
+  # they are left in place (harmless: the apply script always uses the
+  # newest token printed below).
+  id_col = if token_cols.include?('label')
+             'label'
+           elsif token_cols.include?('name')
+             'name'
+           end
+  if id_col
     begin
-      Token.where(label: 'bike-bridge').destroy_all
+      Token.where(id_col => 'bike-bridge').destroy_all
     rescue StandardError => e
       # Callbacks on destroy can fail on some versions; the rows are plain
       # auth tokens with no dependents, so a callback-free delete is safe.
       report << "token destroy_all failed (#{e.class}), trying delete_all"
       begin
-        Token.where(label: 'bike-bridge').delete_all
+        Token.where(id_col => 'bike-bridge').delete_all
       rescue StandardError => e2
         report << "FAILED token cleanup: #{e2.class}: #{e2.message.to_s[0, 120]}"
       end
     end
   else
-    # Zammad 7.x dropped the label column on tokens, so old bridge tokens
-    # cannot be told apart from other API tokens; leave them in place
-    # (harmless: the apply script always uses the newest token printed
-    # below, and old tokens simply stay valid but unused).
-    report << 'skip token cleanup: no label column on Token (Zammad 7.x)'
+    report << 'skip token cleanup: no label/name column on Token'
   end
   token_attrs = { user_id: admin.id, persistent: true, action: 'api',
                   preferences: { 'permission' => ['admin', 'ticket.agent'] } }
   token_attrs[:label] = 'bike-bridge' if token_cols.include?('label')
+  token_attrs[:name] = 'bike-bridge' if token_cols.include?('name')
   token = Token.create!(token_attrs)
-  puts "API_TOKEN=#{token.name}"
+  # The credential lives in different columns per version: Zammad 6.x
+  # stores it in `name`, 7.x in `token` (name is then just a display
+  # label, nil unless set). Prefer the filled one.
+  token_value = begin
+    token[:token]
+  rescue StandardError
+    nil
+  end
+  if (token_value.nil? || token_value.to_s.empty?) && token.respond_to?(:name)
+    token_value = token.name
+  end
+  puts "API_TOKEN=#{token_value}"
 rescue StandardError => e
   report << "FAILED token setup: #{e.class}: #{e.message.to_s[0, 120]}"
 end
