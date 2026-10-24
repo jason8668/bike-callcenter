@@ -98,7 +98,7 @@ STATE_NAMES = {
   'merged' => '已合并', 'removed' => '已删除'
 }.freeze
 begin
-  TicketState.all.each do |st|
+  Ticket::State.all.each do |st|
     target = STATE_NAMES[st.name]
     next unless target
     st.name = target
@@ -111,7 +111,7 @@ end
 
 PRIO_NAMES = { '1 low' => '低', '2 normal' => '普通', '3 high' => '高' }.freeze
 begin
-  TicketPriority.all.each do |p|
+  Ticket::Priority.all.each do |p|
     target = PRIO_NAMES[p.name]
     next unless target
     p.name = target
@@ -147,21 +147,35 @@ begin
   rescue StandardError => e
     report << "FAILED tokens table check: #{e.class}"
   end
-  begin
-    Token.where(label: 'bike-bridge').destroy_all
-  rescue StandardError => e
-    # Callbacks on destroy can fail on some versions; the rows are plain
-    # auth tokens with no dependents, so a callback-free delete is safe.
-    report << "token destroy_all failed (#{e.class}), trying delete_all"
-    begin
-      Token.where(label: 'bike-bridge').delete_all
-    rescue StandardError => e2
-      report << "FAILED token cleanup: #{e2.class}: #{e2.message.to_s[0, 120]}"
-    end
+  token_cols = begin
+    Token.column_names
+  rescue StandardError
+    []
   end
-  token = Token.create!(user_id: admin.id, persistent: true, action: 'api',
-                        label: 'bike-bridge',
-                        preferences: { 'permission' => ['admin', 'ticket.agent'] })
+  if token_cols.include?('label')
+    begin
+      Token.where(label: 'bike-bridge').destroy_all
+    rescue StandardError => e
+      # Callbacks on destroy can fail on some versions; the rows are plain
+      # auth tokens with no dependents, so a callback-free delete is safe.
+      report << "token destroy_all failed (#{e.class}), trying delete_all"
+      begin
+        Token.where(label: 'bike-bridge').delete_all
+      rescue StandardError => e2
+        report << "FAILED token cleanup: #{e2.class}: #{e2.message.to_s[0, 120]}"
+      end
+    end
+  else
+    # Zammad 7.x dropped the label column on tokens, so old bridge tokens
+    # cannot be told apart from other API tokens; leave them in place
+    # (harmless: the apply script always uses the newest token printed
+    # below, and old tokens simply stay valid but unused).
+    report << 'skip token cleanup: no label column on Token (Zammad 7.x)'
+  end
+  token_attrs = { user_id: admin.id, persistent: true, action: 'api',
+                  preferences: { 'permission' => ['admin', 'ticket.agent'] } }
+  token_attrs[:label] = 'bike-bridge' if token_cols.include?('label')
+  token = Token.create!(token_attrs)
   puts "API_TOKEN=#{token.name}"
 rescue StandardError => e
   report << "FAILED token setup: #{e.class}: #{e.message.to_s[0, 120]}"

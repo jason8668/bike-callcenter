@@ -20,7 +20,9 @@ ZDIR="$APP_DIR/deploy/zammad"
 
 echo "[1/6] Pull latest code"
 cd "$APP_DIR"
-git pull || git pull https://gh-proxy.com/https://github.com/jason8668/bike-callcenter.git main
+# Proxy first: direct github.com access from this host currently fails
+# (curl 28 timeouts and GnuTLS -110 resets); fall back to direct if needed.
+git pull https://gh-proxy.com/https://github.com/jason8668/bike-callcenter.git main || git pull
 
 echo "[2/6] Configure Zammad (language / channels / tokens)"
 cd "$ZDIR"
