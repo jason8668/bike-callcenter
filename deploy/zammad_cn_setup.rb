@@ -97,29 +97,39 @@ STATE_NAMES = {
   'pending close' => '待确认办结', 'closed' => '已办结',
   'merged' => '已合并', 'removed' => '已删除'
 }.freeze
-begin
-  Ticket::State.all.each do |st|
-    target = STATE_NAMES[st.name]
-    next unless target
+Ticket::State.all.each do |st|
+  target = STATE_NAMES[st.name]
+  next unless target
+  begin
     st.name = target
     st.save!(validate: false)
     report << "ticket state renamed (id #{st.id})"
+  rescue ActiveRecord::RecordNotSaved
+    # Some seeded states (notably 'closed') halt the normal save via a
+    # callback; a display-name rename needs no callbacks, so write the
+    # column directly as a fallback.
+    begin
+      st.update_column(:name, target)
+      report << "ticket state renamed via column (id #{st.id})"
+    rescue StandardError => e2
+      report << "FAILED state rename id #{st.id}: #{e2.class}: #{e2.message.to_s[0, 100]}"
+    end
+  rescue StandardError => e
+    report << "FAILED state rename id #{st.id}: #{e.class}: #{e.message.to_s[0, 100]}"
   end
-rescue StandardError => e
-  report << "FAILED state rename: #{e.class}"
 end
 
 PRIO_NAMES = { '1 low' => '低', '2 normal' => '普通', '3 high' => '高' }.freeze
-begin
-  Ticket::Priority.all.each do |p|
-    target = PRIO_NAMES[p.name]
-    next unless target
+Ticket::Priority.all.each do |p|
+  target = PRIO_NAMES[p.name]
+  next unless target
+  begin
     p.name = target
     p.save!(validate: false)
     report << "ticket priority renamed (id #{p.id})"
+  rescue StandardError => e
+    report << "FAILED priority rename id #{p.id}: #{e.class}: #{e.message.to_s[0, 100]}"
   end
-rescue StandardError => e
-  report << "FAILED priority rename: #{e.class}"
 end
 
 begin
