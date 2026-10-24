@@ -43,8 +43,24 @@ fi
 
 echo "[3/6] Save tokens into bridge .env (values are not shown)"
 cd "$APP_DIR/middleware"
-sed -i "s|^ZAMMAD_TOKEN=.*|ZAMMAD_TOKEN=$API_TOKEN|" .env
-sed -i "s|^ZAMMAD_CTI_TOKEN=.*|ZAMMAD_CTI_TOKEN=$CTI_TOKEN|" .env
+# Plain sed replace silently no-ops when the key line is absent (the
+# installer template only ships BRIDGE_SECRET), which used to leave the
+# bridge with an empty token while later steps still printed Done.
+# Replace-or-append, then verify the lines are really there and non-empty.
+upsert_env() {
+  if grep -q "^$1=" "$3"; then
+    sed -i "s|^$1=.*|$1=$2|" "$3"
+  else
+    echo "$1=$2" >> "$3"
+  fi
+}
+upsert_env ZAMMAD_TOKEN "$API_TOKEN" .env
+upsert_env ZAMMAD_CTI_TOKEN "$CTI_TOKEN" .env
+if [ "$(grep -c '^ZAMMAD_TOKEN=.\+' .env)" != "1" ] || \
+   [ "$(grep -c '^ZAMMAD_CTI_TOKEN=.\+' .env)" != "1" ]; then
+  echo "ERROR: tokens were not saved into .env, refusing to continue."
+  exit 1
+fi
 echo "tokens saved."
 
 echo "[4/6] Create bicycle groups and ticket fields"
