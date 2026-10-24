@@ -3,51 +3,53 @@
 # access to create a ticket. The first-run admin user has neither by
 # default (the Admin role alone is not enough), so ticket creation via
 # the bridge API fails with 403 while admin calls (users, groups, fields)
-# succeed with the same token. This script adds the Agent role and full
-# access to every active group to that user. Idempotent. Run inside the
-# railsserver container:
+# succeed with the same token.
+# v2 fix (2026-10-24): the v1 script wrote group rows with raw SQL that
+# selected the groups_users.id column - but that join table HAS NO id
+# column (group_id + user_id + access only), so every group grant failed
+# with PG::UndefinedColumn and the rows were never written (diag kept
+# showing NO ROW). This version uses Zammad's own model API instead:
+# User#group_ids_access_map= writes the join rows correctly, no SQL.
+# Targets the bike-bridge token owner first (the account that actually
+# creates tickets), falling back to the first non-system admin.
+# Idempotent. Run inside the railsserver container:
 #   bundle exec rails runner /tmp/grant_agent_access.rb
 # Console output is English-only on purpose.
-admin = User.all.reject { |u| u.id == 1 }.find do |u|
-  u.roles.any? { |r| r.permissions.any? { |p| p.name == 'admin' } }
+token = Token.find_by(name: 'bike-bridge')
+user = token&.user
+if user.nil?
+  user = User.all.reject { |u| u.id == 1 }.find do |u|
+    u.roles.any? { |r| r.permissions.any? { |p| p.name == 'admin' } }
+  end
 end
-if admin.nil?
-  puts 'ERROR: no admin user found'
+if user.nil?
+  puts 'ERROR: no API user found'
   exit 1
 end
-puts "user: #{admin.login} (id=#{admin.id})"
-puts "roles before: #{admin.roles.map(&:name).join(',')}"
+puts "user: #{user.login} (id=#{user.id})"
+puts "roles before: #{user.roles.map(&:name).join(',')}"
 agent_role = Role.find_by(name: 'Agent')
 if agent_role.nil?
   puts 'ERROR: Agent role not found'
   exit 1
 end
-if admin.roles.map(&:id).include?(agent_role.id)
+if user.roles.map(&:id).include?(agent_role.id)
   puts 'Agent role already present'
 else
-  admin.roles << agent_role
+  user.roles << agent_role
   puts 'Agent role added'
 end
-conn = ActiveRecord::Base.connection
-Group.where(active: true).each do |g|
-  begin
-    row = conn.select_one(
-      "SELECT id FROM groups_users WHERE user_id = #{admin.id} AND group_id = #{g.id}"
-    )
-    if row
-      conn.execute(
-        "UPDATE groups_users SET access = 'full', updated_at = NOW() WHERE id = #{row['id']}"
-      )
-      puts "group access updated to full: #{g.name} (id=#{g.id})"
-    else
-      conn.execute(
-        "INSERT INTO groups_users (user_id, group_id, access, created_at, updated_at) " \
-        "VALUES (#{admin.id}, #{g.id}, 'full', NOW(), NOW())"
-      )
-      puts "group access granted full: #{g.name} (id=#{g.id})"
-    end
-  rescue StandardError => e
-    puts "FAILED group #{g.name} (id=#{g.id}): #{e.class}: #{e.message.to_s[0, 100]}"
+groups = Group.where(active: true)
+if groups.empty?
+  puts 'WARNING: no active groups found, nothing to grant'
+else
+  access_map = {}
+  groups.each { |g| access_map[g.id] = 'full' }
+  user.group_ids_access_map = access_map
+  user.save!
+  groups.each do |g|
+    puts "group access granted full: #{g.name} (id=#{g.id})"
   end
+  puts "group_ids_access_map now: #{user.group_ids_access_map.inspect}"
 end
 puts 'GRANT_AGENT_DONE'
