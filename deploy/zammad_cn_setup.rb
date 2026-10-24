@@ -134,26 +134,54 @@ rescue StandardError => e
 end
 
 # --- 5. bridge tokens -----------------------------------------------------
-admin = User.all.reject { |u| u.id == 1 }.find do |u|
-  u.roles.any? { |r| r.permissions.any? { |p| p.name == 'admin' } }
+# NOTE: this block must never abort the script: if token setup fails, the
+# apply wrapper needs the report lines below (not a bare traceback) to
+# tell the operator what broke, and a re-run stays safe (idempotent).
+begin
+  admin = User.all.reject { |u| u.id == 1 }.find do |u|
+    u.roles.any? { |r| r.permissions.any? { |p| p.name == 'admin' } }
+  end
+  admin ||= User.find_by(id: 2) || User.last
+  begin
+    report << "tokens table exists=#{ActiveRecord::Base.connection.table_exists?(:tokens)}"
+  rescue StandardError => e
+    report << "FAILED tokens table check: #{e.class}"
+  end
+  begin
+    Token.where(label: 'bike-bridge').destroy_all
+  rescue StandardError => e
+    # Callbacks on destroy can fail on some versions; the rows are plain
+    # auth tokens with no dependents, so a callback-free delete is safe.
+    report << "token destroy_all failed (#{e.class}), trying delete_all"
+    begin
+      Token.where(label: 'bike-bridge').delete_all
+    rescue StandardError => e2
+      report << "FAILED token cleanup: #{e2.class}: #{e2.message.to_s[0, 120]}"
+    end
+  end
+  token = Token.create!(user_id: admin.id, persistent: true, action: 'api',
+                        label: 'bike-bridge',
+                        preferences: { 'permission' => ['admin', 'ticket.agent'] })
+  puts "API_TOKEN=#{token.name}"
+rescue StandardError => e
+  report << "FAILED token setup: #{e.class}: #{e.message.to_s[0, 120]}"
 end
-admin ||= User.find_by(id: 2) || User.last
-Token.where(label: 'bike-bridge').destroy_all
-token = Token.create!(user_id: admin.id, persistent: true, action: 'api',
-                      label: 'bike-bridge',
-                      preferences: { 'permission' => ['admin', 'ticket.agent'] })
-puts "API_TOKEN=#{token.name}"
 
-cti = begin
-  Setting.get('cti_token')
+begin
+  cti = Setting.get('cti_token')
 rescue StandardError
-  nil
+  cti = nil
 end
 if cti.nil? || cti.to_s.empty?
-  cti = SecureRandom.urlsafe_base64(24)
-  Setting.set('cti_token', cti)
+  begin
+    cti = SecureRandom.urlsafe_base64(24)
+    Setting.set('cti_token', cti)
+  rescue StandardError => e
+    report << "FAILED cti_token setup: #{e.class}"
+    cti = nil
+  end
 end
-puts "CTI_TOKEN=#{cti}"
+puts "CTI_TOKEN=#{cti}" if cti
 
 puts '--- cn setup report ---'
 report.each { |line| puts line }
