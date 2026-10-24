@@ -134,6 +134,13 @@ class CallStore:
                 c.execute("ALTER TABLE calls ADD COLUMN callee TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass  # column already exists
+            # recording_attached tracks whether the hangup CDR already
+            # attached the recording to the answer-time ticket, so a
+            # duplicate CDR does not attach it twice.
+            try:
+                c.execute("ALTER TABLE calls ADD COLUMN recording_attached INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -142,6 +149,16 @@ class CallStore:
         with self._conn() as c:
             row = c.execute("SELECT ticket_id FROM calls WHERE call_id=?", (call_id,)).fetchone()
         return row[0] if row and row[0] else None
+
+    def is_recording_attached(self, call_id: str) -> bool:
+        with self._conn() as c:
+            row = c.execute("SELECT recording_attached FROM calls WHERE call_id=?",
+                            (call_id,)).fetchone()
+        return bool(row and row[0])
+
+    def mark_recording_attached(self, call_id: str) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE calls SET recording_attached=1 WHERE call_id=?", (call_id,))
 
     def tickets_for_caller(self, phone: str, limit: int = 10) -> list[int]:
         """Ticket ids previously bound to this caller number, newest first."""
@@ -333,12 +350,19 @@ class ZammadClient:
     def create_ticket_with_recording(self, rec: CallRecord, customer_id: Optional[int],
                                      recording_bytes: Optional[bytes] = None,
                                      recording_filename: str = "",
-                                     history_note: str = "") -> Optional[int]:
+                                     history_note: str = "",
+                                     in_progress: bool = False) -> Optional[int]:
+        """Ticket for a call. in_progress=True means the call is still
+        going on (ticket opened at answer time): the article says so and
+        the recording is attached later, when the CDR arrives."""
+        dur = "进行中" if in_progress else f"{rec.duration_sec}s"
         article_body = (
             f"来电自动建单\n主叫: {rec.caller} 被叫: {rec.callee}\n"
-            f"CallID: {rec.call_id}\n通话时长: {rec.duration_sec}s\n"
+            f"CallID: {rec.call_id}\n通话时长: {dur}\n"
             f"类型: {rec.ticket_type or '电话来电'}"
         )
+        if in_progress:
+            article_body += "\n通话进行中，坐席正在记录；录音将在通话结束后附上。"
         if history_note:
             article_body += f"\n历史提示: {history_note}"
         article: dict = {
@@ -443,12 +467,35 @@ class Bridge:
         if not rec.call_id:
             return {"ok": False, "error": "missing call_id/uuid"}
         self.zammad.push_cti_event(event, rec)
+        # The ticket must exist WHILE the agent is on the phone, so the
+        # agent can take notes during the call instead of waiting for
+        # hangup. On answer (inbound only), open the ticket now; the
+        # recording is attached later, when the CDR arrives. A missed
+        # call never sends answer, so it still creates no ticket.
+        if event == "answer" and rec.direction == "in":
+            existing = self.store.get_ticket_id(rec.call_id)
+            if existing:
+                return {"ok": True, "call_id": rec.call_id, "event": event,
+                        "ticket_id": existing, "note": "already bound"}
+            rec.answered = True
+            ticket_id, _attached, history_note = self._bind_ticket(
+                rec, in_progress=True)
+            if ticket_id is None:
+                # CTI already went out; surface the ticket error without
+                # failing the event (the CDR path will retry creation).
+                return {"ok": True, "call_id": rec.call_id, "event": event,
+                        "ticket_error": self.zammad.last_ticket_error}
+            self.store.record(rec, ticket_id)
+            return {"ok": True, "call_id": rec.call_id, "event": event,
+                    "ticket_id": ticket_id, "history_hint": history_note}
         return {"ok": True, "call_id": rec.call_id, "event": event}
 
-    def _bind_ticket(self, rec: CallRecord) -> tuple[Optional[int], bool, str]:
+    def _bind_ticket(self, rec: CallRecord, in_progress: bool = False) -> tuple[Optional[int], bool, str]:
         """Create the Zammad ticket for an answered contact (call or
         voicemail): recording attached, returning-caller keyword hint
-        stamped on top. Returns (ticket_id, recording_attached, hint)."""
+        stamped on top. Returns (ticket_id, recording_attached, hint).
+        in_progress=True opens the ticket at answer time (no recording
+        yet); the CDR attaches the recording afterwards."""
         recording = self.recording_reader(rec)
         filename = os.path.basename(rec.recording_path) if rec.recording_path else ""
         customer_id = self.zammad.phone_customer_id()
@@ -464,7 +511,8 @@ class Bridge:
         except Exception:
             history_note = ""
         ticket_id = self.zammad.create_ticket_with_recording(
-            rec, customer_id, recording, filename, history_note=history_note)
+            rec, customer_id, recording, filename, history_note=history_note,
+            in_progress=in_progress)
         return ticket_id, recording is not None, history_note
 
     def handle_cdr(self, payload: dict) -> dict:
@@ -478,16 +526,34 @@ class Bridge:
             self.store.record(rec, None)
             return {"ok": True, "call_id": rec.call_id, "ticket_id": None,
                     "note": "missed call, no ticket created"}
-        # 3) idempotency: one CallID = one ticket
+        # 3) idempotency: one CallID = one ticket. If the ticket was
+        # already opened at answer time, the CDR only attaches the
+        # recording to it (once); otherwise the ticket is created now,
+        # recording included.
         existing = self.store.get_ticket_id(rec.call_id)
         if existing:
+            if self.store.is_recording_attached(rec.call_id):
+                self.store.record(rec, existing)
+                return {"ok": True, "call_id": rec.call_id, "ticket_id": existing,
+                        "note": "already bound"}
+            recording = self.recording_reader(rec)
+            filename = os.path.basename(rec.recording_path) if rec.recording_path else ""
+            attached = self.zammad.add_recording_to_ticket(
+                existing, rec, recording, filename)
+            has_audio = recording is not None or bool(rec.recording_url)
+            if attached and has_audio:
+                self.store.mark_recording_attached(rec.call_id)
+            self.store.record(rec, existing)
             return {"ok": True, "call_id": rec.call_id, "ticket_id": existing,
-                    "note": "already bound"}
+                    "recording_attached": attached,
+                    "note": "recording attached to live ticket"}
         ticket_id, attached, history_note = self._bind_ticket(rec)
         if ticket_id is None:
             return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed",
                     "zammad_error": self.zammad.last_ticket_error}
         self.store.record(rec, ticket_id)
+        if attached:
+            self.store.mark_recording_attached(rec.call_id)
         return {"ok": True, "call_id": rec.call_id, "ticket_id": ticket_id,
                 "recording_attached": attached, "history_hint": history_note}
 

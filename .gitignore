@@ -1,5 +1,6 @@
 .env
 middleware/.env
+agents.txt
 deploy/zammad/
 *.db
 __pycache__/

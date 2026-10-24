@@ -2,7 +2,7 @@
 """One-shot Zammad setup for the bicycle customer-service project.
 
 Creates (idempotently — existing objects are skipped):
-  1. Ticket groups: 客服组 / 报修组 / 投诉组 / 咨询组 / 运维组
+  1. Ticket groups: 客服组 only (one group; dispatch is by owner, not group)
   2. Ticket custom attributes (ObjectManager):
        call_id        通话唯一ID (text, unique-ish, searchable)
        recording_url  录音访问地址 (text)
@@ -37,7 +37,7 @@ import urllib.error
 BASE = os.environ.get("ZAMMAD_URL", "http://127.0.0.1:8899").rstrip("/")
 TOKEN = os.environ["ZAMMAD_TOKEN"]
 
-GROUPS = ["客服组", "报修组", "投诉组", "咨询组", "运维组"]
+GROUPS = ["客服组"]
 
 ATTRIBUTES = [
     ("call_id", "通话ID", "input", {"type": "text", "maxlength": 64}),

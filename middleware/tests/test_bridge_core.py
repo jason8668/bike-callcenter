@@ -29,6 +29,8 @@ class FakeTransport:
             return 200, json.dumps({
                 "id": 101, "fault_type": "锁故障", "ticket_type": "故障报修",
                 "created_at": "2026-10-20T09:00:00Z"}).encode()
+        if url.endswith("/api/v1/ticket_articles") and method == "POST":
+            return 201, b"{}"
         if url.endswith("/api/v1/tickets"):
             self.ticket_seq += 1
             return 201, json.dumps({"id": self.ticket_seq}).encode()
@@ -68,7 +70,7 @@ class TestBridge(unittest.TestCase):
                               cti_token="cti-tok")
         self.bridge = Bridge(zammad=zammad,
                              store=CallStore(os.path.join(self.tmp, "b.db")),
-                             recording_reader=lambda rec: b"RIFF-fake-wav")
+                             recording_reader=lambda rec: b"RIFF-fake-wav" if rec.recording_path else None)
 
     def test_answered_call_creates_ticket_with_recording(self):
         out = self.bridge.handle_cdr(CDR)
@@ -102,6 +104,57 @@ class TestBridge(unittest.TestCase):
                       if c[1].endswith("/api/v1/users") and c[0] == "POST"]
         self.assertEqual(len(user_posts), 1)
 
+    def test_answer_event_opens_ticket_during_call(self):
+        """The ticket exists at answer time (no recording yet), so the
+        agent can take notes while still on the phone."""
+        out = self.bridge.handle_event("answer", {
+            "uuid": "live-1", "caller_id_number": "13800000000",
+            "destination_number": "4008000000", "direction": "inbound",
+            "start_epoch": "1792800000"})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["ticket_id"], 101)
+        ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
+        self.assertEqual(len(ticket_posts), 1)
+        payload = json.loads(ticket_posts[0][3])
+        self.assertNotIn("attachments", payload["article"])
+        self.assertIn("进行中", payload["article"]["body"])
+
+    def test_cdr_attaches_recording_to_live_ticket(self):
+        """Hangup CDR attaches the recording to the answer-time ticket
+        instead of creating a second ticket; a duplicate CDR attaches
+        nothing twice."""
+        self.bridge.handle_event("answer", {
+            "uuid": "live-2", "caller_id_number": "13800000000",
+            "destination_number": "4008000000", "direction": "inbound",
+            "start_epoch": "1792800000"})
+        out = self.bridge.handle_cdr({**CDR, "uuid": "live-2"})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["ticket_id"], 101)
+        self.assertTrue(out["recording_attached"])
+        ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
+        self.assertEqual(len(ticket_posts), 1)
+        article_posts = [c for c in self.transport.calls
+                         if c[1].endswith("/api/v1/ticket_articles")]
+        self.assertEqual(len(article_posts), 1)
+        self.assertIn("attachments", json.loads(article_posts[0][3]))
+        again = self.bridge.handle_cdr({**CDR, "uuid": "live-2"})
+        self.assertEqual(again["note"], "already bound")
+        article_posts = [c for c in self.transport.calls
+                         if c[1].endswith("/api/v1/ticket_articles")]
+        self.assertEqual(len(article_posts), 1)
+
+    def test_newcall_alone_creates_no_ticket(self):
+        """Ringing (newCall) pops the caller card only; the ticket opens
+        on answer, so a never-answered call still creates no ticket."""
+        out = self.bridge.handle_event("newCall", {
+            "uuid": "ring-1", "caller_id_number": "13800000000",
+            "destination_number": "4008000000", "direction": "inbound",
+            "start_epoch": "1792800000"})
+        self.assertTrue(out["ok"])
+        self.assertNotIn("ticket_id", out)
+        ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
+        self.assertEqual(len(ticket_posts), 0)
+
     def test_missed_call_creates_no_ticket(self):
         out = self.bridge.handle_cdr({**CDR, "uuid": "miss-1", "billsec": "0", "duration": "20"})
         self.assertTrue(out["ok"])
@@ -131,7 +184,7 @@ class TestVoicemail(unittest.TestCase):
                               cti_token="cti-tok")
         self.bridge = Bridge(zammad=zammad,
                              store=CallStore(os.path.join(self.tmp, "b.db")),
-                             recording_reader=lambda rec: b"RIFF-fake-wav")
+                             recording_reader=lambda rec: b"RIFF-fake-wav" if rec.recording_path else None)
 
     def test_voicemail_creates_ticket_in_service_group(self):
         out = self.bridge.handle_voicemail(VM)
@@ -179,7 +232,7 @@ class TestHistoryHint(unittest.TestCase):
         zammad = ZammadClient("http://zammad.local", "tok", transport=transport,
                               cti_token=None)
         bridge = Bridge(zammad=zammad, store=CallStore(os.path.join(tmp, "b.db")),
-                        recording_reader=lambda rec: b"RIFF-fake-wav")
+                        recording_reader=lambda rec: b"RIFF-fake-wav" if rec.recording_path else None)
         bridge.handle_cdr(CDR)  # first call -> ticket 101
         out = bridge.handle_cdr({**CDR, "uuid": "repeat-1"})
         self.assertTrue(out["ok"])

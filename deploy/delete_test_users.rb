@@ -1,11 +1,12 @@
 # delete_test_users.rb - remove the auto-* test users created by the old
 # per-caller bridge code (superseded: phone tickets now file under one
-# shared "phone-customer"). Two steps, no typed confirmation word:
-#   1. preview: bundle exec rails runner /tmp/delete_test_users.rb
-#   2. delete:  CONFIRM=1 bundle exec rails runner /tmp/delete_test_users.rb
-#      (via: docker compose exec -e CONFIRM=1 -T zammad-railsserver ...)
+# shared "phone-customer"). Lists the users, then asks Y/N: press Y to
+# delete, N to cancel. No typed confirmation word.
+# Run WITHOUT -T so you can type the answer:
+#   docker compose exec zammad-railsserver bundle exec rails runner /tmp/delete_test_users.rb
 # Safety: only login LIKE 'auto-%'; skips any user who still has tickets
-# and any admin account. Console output is English-only on purpose.
+# and any admin account. Anything other than Y cancels. Console output is
+# English-only on purpose.
 users = User.where("login LIKE 'auto-%'").order(:id).to_a
 if users.empty?
   puts 'No auto-* test users found.'
@@ -26,9 +27,11 @@ if deletable.empty?
   puts 'Nothing deletable.'
   exit 0
 end
-if ENV['CONFIRM'] == '1'
+print "Delete these #{deletable.size} test users? Press Y to confirm, N to cancel: "
+answer = STDIN.gets.to_s.strip.upcase
+if answer == 'Y'
   deletable.each(&:destroy)
   puts "DELETED #{deletable.size} test users"
 else
-  puts 'Preview only. Re-run with CONFIRM=1 to actually delete.'
+  puts 'Cancelled. Nothing deleted.'
 end

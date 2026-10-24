@@ -183,8 +183,9 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <body>
 <h1>模拟来电测试</h1>
 <p class="hint">还没有接电话线路时，用这个页面模拟一通客户来电：系统会像真来电一样
-弹出来电提示，通话结束后自动生成一张带录音附件的工单。来电不带任何预分类：
-工单先进客服组，由坐席接听后在工单里填写服务类型等信息。</p>
+弹出来电提示，接通时工单就自动弹出来（带电话号码），坐席可以在通话过程中
+记录；通话结束后录音自动附到这张工单上。来电不带任何预分类：工单先进入客服组，
+由坐席在工单里填写服务类型等信息。</p>
 
 <label>客户手机号码</label>
 <input id="caller" value="13800000000">
@@ -337,8 +338,10 @@ async def simulate(request: Request, x_bridge_secret: str | None = Header(defaul
     """Trial helper: one fake answered call, end to end, no real phone line.
 
     Creates a 1-second silent WAV in the recordings dir, pushes newCall +
-    answer events, then posts a CDR so a Zammad ticket with the recording
-    attached should appear. Safe to run repeatedly (unique call id each run).
+    answer events (the answer opens the ticket immediately, so the agent
+    could take notes during the call), then posts a CDR that attaches the
+    recording to that same ticket. Safe to run repeatedly (unique call id
+    each run).
 
     The call carries NO pre-classification (real calls arrive plain; the
     agent classifies the ticket in Zammad afterwards), so the ticket lands

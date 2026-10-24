@@ -1,9 +1,9 @@
 -- zammad_bridge.lua
 -- FreeSWITCH Lua hook: pushes call events to the bridge middleware so Zammad
 -- can pop the caller card (newCall/answer) in real time.
--- The heavy work (ticket creation + recording upload) happens on hangup via
--- mod_xml_cdr -> POST /cdr, NOT here, so this script stays fast and never
--- blocks the call.
+-- The ticket is opened on answer (so agents can take notes during the
+-- call); only the recording is attached on hangup via mod_xml_cdr ->
+-- POST /cdr, so this script stays fast and never blocks the call.
 --
 -- Install:
 --   1) Copy to /usr/share/freeswitch/scripts/zammad_bridge.lua
