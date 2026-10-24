@@ -85,8 +85,41 @@ open(p, "w").write(s)
 PYEOF
 
 echo "[5/6] Building and starting FreeSWITCH..."
+echo "Preflight: SignalWire token and repo reachability..."
+TOKEN_FILE="/opt/bike-callcenter/freeswitch/signalwire-token.txt"
+if [ ! -s "$TOKEN_FILE" ]; then
+  echo "ERROR: missing $TOKEN_FILE (the SignalWire repo needs a free token)."
+  echo "  1) Create a free account at https://signalwire.com"
+  echo "  2) Create a Personal Access Token in your account settings"
+  echo "  3) Save ONLY the token (one line) to this file, then re-run this script:"
+  echo "     echo 'YOUR_TOKEN_HERE' > /opt/bike-callcenter/freeswitch/signalwire-token.txt"
+  echo "Do NOT send the token to anyone; it stays in this file on the server."
+  exit 1
+fi
+chmod 600 "$TOKEN_FILE"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 https://freeswitch.signalwire.com/ || echo "000")
+if [ "$CODE" = "000" ]; then
+  echo "ERROR: freeswitch.signalwire.com is unreachable from this server"
+  echo "(network failure, not an auth problem). Stop here and report this:"
+  echo "the fallback is a from-source build, which needs different steps."
+  exit 1
+fi
+echo "SignalWire repo reachable (HTTP $CODE); building..."
 cd deploy
-docker compose up -d --build freeswitch
+docker compose rm -f freeswitch 2>/dev/null || true
+docker buildx build --load -t deploy-freeswitch \
+  --secret id=sw_token,src=../freeswitch/signalwire-token.txt \
+  ../freeswitch || {
+  echo "ERROR: FreeSWITCH image build failed (see the error above)."
+  echo "If a module is reported MISSING, or apt reports 401/403, the"
+  echo "token is wrong or expired: replace $TOKEN_FILE and re-run."
+  exit 1
+}
+docker compose up -d freeswitch || {
+  echo "ERROR: FreeSWITCH container failed to start."
+  docker compose logs --tail 40 freeswitch
+  exit 1
+}
 
 echo "[6/6] Waiting for FreeSWITCH to answer (up to 120s)..."
 OK=""

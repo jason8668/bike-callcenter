@@ -4,6 +4,7 @@ agents.txt
 freeswitch/conf-live/
 freeswitch/extensions.txt
 freeswitch/esl-password.txt
+freeswitch/signalwire-token.txt
 deploy/zammad/
 *.db
 __pycache__/

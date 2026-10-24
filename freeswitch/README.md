@@ -4,6 +4,16 @@
 配置由 `deploy/install-freeswitch.sh` 从 `conf-templates/` 生成到
 `conf-live/`（密码与密钥只在服务器上，不进 Git）。
 
+> 安装前提（2026-10-24 排障结论）：Debian 官方仓库已下架整套
+> FreeSWITCH（所有版本都搜不到），所以镜像改用 SignalWire 官方
+> 仓库（Debian 12 底包）+ 显式包名 + 装完硬校验（缺二进制或缺
+> 模块就让构建直接失败，不再出现“0.5 秒假成功”。SignalWire
+> 仓库需要一个免费 Personal Access Token：去 signalwire.com 注
+> 册免费账号，在账号设置里建一个 Token，只存一行到服务器文件
+> `freeswitch/signalwire-token.txt`（不要发给任何人），再跑安装
+> 脚本；脚本会先测仓库连通性，连不上会明说停下（那时再改
+> 从源码编译的后备方案）。
+
 ```
 客服系统  http://36.139.118.227:8899   (Zammad)
 中间件    http://36.139.118.227:8890   (测试页 / 建坐席 / 来电看板)
