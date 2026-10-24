@@ -5,7 +5,8 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from bridge_core import Bridge, CallStore, ZammadClient, parse_cdr, summarize_history  # noqa: E402
+from bridge_core import (Bridge, CallRecord, CallStore, ZammadClient,  # noqa: E402
+                         parse_cdr, summarize_history)
 
 
 class FakeTransport:
@@ -75,6 +76,17 @@ class TestBridge(unittest.TestCase):
         self.bridge = Bridge(zammad=zammad,
                              store=CallStore(os.path.join(self.tmp, "b.db")),
                              recording_reader=lambda rec: b"RIFF-fake-wav" if rec.recording_path else None)
+
+    def test_recent_tickets_newest_first_and_only_ticketed(self):
+        self.bridge.handle_cdr(CDR)  # ticketed, caller 13800000000
+        self.bridge.store.record(CallRecord(call_id="no-ticket", caller="13700000000",
+                                            callee="", direction="in"),
+                                 None)
+        rows = self.bridge.store.recent_tickets(10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["caller"], "13800000000")
+        self.assertTrue(rows[0]["ticket_id"])
+        self.assertTrue(rows[0]["rowid"] > 0)
 
     def test_answered_call_creates_ticket_with_recording(self):
         out = self.bridge.handle_cdr(CDR)

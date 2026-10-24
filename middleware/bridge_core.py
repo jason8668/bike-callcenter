@@ -160,6 +160,18 @@ class CallStore:
         with self._conn() as c:
             c.execute("UPDATE calls SET recording_attached=1 WHERE call_id=?", (call_id,))
 
+    def recent_tickets(self, limit: int = 20) -> list[dict]:
+        """Newest ticketed calls first, for the agent board feed:
+        each row carries its monotonic rowid so the board can tell a
+        newly arrived ticket from ones it already saw."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT rowid, call_id, caller, ticket_id, created_at FROM calls "
+                "WHERE ticket_id IS NOT NULL ORDER BY rowid DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [{"rowid": r[0], "call_id": r[1], "caller": r[2],
+                 "ticket_id": r[3], "created_at": r[4]} for r in rows]
+
     def tickets_for_caller(self, phone: str, limit: int = 10) -> list[int]:
         """Ticket ids previously bound to this caller number, newest first."""
         if not phone:

@@ -535,3 +535,131 @@ async def create_agent_account(request: Request, x_bridge_secret: str | None = H
     if user_id is None:
         return {"ok": False, "error": "账号已存在" if err == "exists" else err}
     return {"ok": True, "login": login, "user_id": user_id}
+
+
+# --- agent board: a ticket pops open by itself, not a list badge --------
+# Why this page exists: Zammad itself never opens a ticket on its own -
+# a new ticket only shows up as a dot on an overview list, and the agent
+# has to notice the dot and click through. During a live call that is
+# too slow. So agents keep this board open: it polls the bridge, and the
+# moment a new ticket is created it navigates THIS tab straight to the
+# Zammad ticket (self-navigation is not blocked by popup blockers).
+# After finishing the ticket, the agent returns to the board bookmark;
+# the next call then pops open the same way.
+BOARD_PAGE_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>坐席来电看板 - 自行车客服系统</title>
+<style>
+  body { font-family: sans-serif; margin: 24px auto; max-width: 560px; padding: 0 16px; color: #222; }
+  h1 { font-size: 20px; }
+  label { display: block; margin: 14px 0 6px; font-size: 14px; }
+  input { width: 100%; padding: 9px; font-size: 15px; box-sizing: border-box; }
+  button { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px;
+           background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+  button:disabled { background: #999; }
+  .hint { color: #666; font-size: 13px; line-height: 1.6; }
+  #status { margin-top: 16px; padding: 10px; border-radius: 6px; background: #f1f1f1; font-size: 14px; }
+  #alert { display: none; margin-top: 16px; padding: 20px; border-radius: 8px;
+           background: #d93025; color: #fff; font-size: 22px; text-align: center;
+           animation: flash 0.8s infinite alternate; }
+  @keyframes flash { from { opacity: 1; } to { opacity: 0.55; } }
+  #recent { margin-top: 16px; font-size: 14px; line-height: 1.9; }
+  #recent a { color: #0e7a5f; }
+</style>
+</head>
+<body>
+<h1>坐席来电看板</h1>
+<p class="hint">上班时打开这个页面并点“开始值班”，来电时页面会自动跳到新工单，不用盯着待办列表的小点。
+工单打开后这个标签页就变成工单页了，处理完请点收藏夹回到看板，下一通电话继续自动弹。</p>
+
+<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
+<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
+
+<button id="go">开始值班</button>
+<div id="status">还没有开始值班。</div>
+<div id="alert"></div>
+<div id="recent"></div>
+
+<script>
+let baseline = 0, watching = false, timer = null, audioCtx = null;
+const params = new URLSearchParams(location.search);
+const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
+if (saved) document.getElementById("secret").value = saved;
+
+function zammadTicketUrl(id) {
+  return location.protocol + "//" + location.hostname + ":8899/#ticket/zoom/" + id;
+}
+function beep() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.frequency.value = 880; g.gain.value = 0.15;
+    o.start(); setTimeout(() => o.stop(), 600);
+  } catch (e) {}
+}
+async function poll() {
+  const secret = document.getElementById("secret").value.trim();
+  let resp;
+  try {
+    resp = await fetch("/board/feed", { headers: { "X-Bridge-Secret": secret } });
+  } catch (e) { return; }
+  if (resp.status === 401) {
+    document.getElementById("status").textContent = "密钥不对，请重新粘贴访问密钥。";
+    return;
+  }
+  if (!resp.ok) return;
+  const data = await resp.json();
+  const rows = data.tickets || [];
+  document.getElementById("recent").innerHTML = rows.map(r =>
+    "<div>" + r.created_at + " 来电 " + r.caller +
+    " <a target='_blank' href='" + zammadTicketUrl(r.ticket_id) + "'>工单 #" + r.ticket_id + "</a></div>"
+  ).join("") || "暂无工单。";
+  if (!rows.length) return;
+  const newest = rows[0];
+  if (newest.rowid > baseline) {
+    baseline = newest.rowid;
+    const box = document.getElementById("alert");
+    box.style.display = "block";
+    box.textContent = "新来电 " + newest.caller + "，正在打开工单 #" + newest.ticket_id + "…";
+    document.getElementById("status").textContent = "新来电，正在打开工单…";
+    beep();
+    setTimeout(() => { location.href = zammadTicketUrl(newest.ticket_id); }, 2000);
+  }
+}
+document.getElementById("go").onclick = async () => {
+  const secret = document.getElementById("secret").value.trim();
+  localStorage.setItem("bridge_secret", secret);
+  try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  document.getElementById("status").textContent = "值班中，正在等来电…";
+  document.getElementById("go").disabled = true;
+  const resp = await fetch("/board/feed", { headers: { "X-Bridge-Secret": secret } });
+  if (resp.ok) {
+    const data = await resp.json();
+    const rows = data.tickets || [];
+    baseline = rows.length ? rows[0].rowid : 0;
+  }
+  watching = true;
+  timer = setInterval(poll, 2000);
+  poll();
+};
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/board", response_class=HTMLResponse)
+def board_page():
+    """Agent board: keep open on shift; new tickets open themselves."""
+    return BOARD_PAGE_HTML
+
+
+@app.get("/board/feed")
+def board_feed(x_bridge_secret: str | None = Header(default=None)):
+    """Newest ticketed calls, newest first (secret-protected)."""
+    check_secret(x_bridge_secret)
+    return {"tickets": bridge.store.recent_tickets(20)}
