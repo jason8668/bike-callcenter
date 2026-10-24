@@ -20,10 +20,25 @@ PAIRS = {
   'User Documentation' => '用户文档',
 }.freeze
 
+# New Translation rows require created_by/updated_by (NOT NULL columns);
+# existing rows already carry them, which is why only brand-new sources
+# failed on the first run. Point them at the first admin user (id 1 is
+# the internal system user and always exists).
+ACTOR_ID = begin
+  admin = User.all.reject { |u| u.id == 1 }.find do |u|
+    u.roles.any? { |r| r.permissions.any? { |p| p.name == 'admin' } }
+  end
+  (admin && admin.id) || 1
+rescue StandardError
+  1
+end
+
 PAIRS.each do |source, target|
   begin
     rec = Translation.find_or_initialize_by(locale: 'zh-cn', source: source)
     rec.target = target
+    rec.created_by_id ||= ACTOR_ID
+    rec.updated_by_id = ACTOR_ID
     rec.save!
     puts "translation ok: #{source}"
   rescue StandardError => e
