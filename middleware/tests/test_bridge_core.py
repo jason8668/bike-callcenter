@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -343,6 +344,152 @@ class TestHistoryHint(unittest.TestCase):
         payload = json.loads(ticket_posts[1][3])
         self.assertIn("历史提示", payload["article"]["body"])
         self.assertIn("锁故障×1", payload["article"]["body"])
+
+
+class DistTransport:
+    """Zammad stub with three seat accounts (8001->11, 8002->12, 8003->13)."""
+
+    def __init__(self):
+        self.calls = []
+        self.ticket_seq = 200
+
+    def __call__(self, method, url, headers, body):
+        self.calls.append((method, url, headers, body))
+        if url.endswith("/api/v1/roles"):
+            return 200, json.dumps([{"id": 3, "name": "Admin"}]).encode()
+        if url.endswith("/api/v1/users?limit=100"):
+            return 200, json.dumps([
+                {"id": 5, "login": "admin", "role_ids": [3]},
+                {"id": 11, "login": "8001", "role_ids": [4]},
+                {"id": 12, "login": "8002", "role_ids": [4]},
+                {"id": 13, "login": "8003", "role_ids": [4]},
+            ]).encode()
+        if url.endswith("/api/v1/tickets"):
+            self.ticket_seq += 1
+            return 201, json.dumps({"id": self.ticket_seq}).encode()
+        if "/api/v1/tickets/" in url and method == "GET":
+            return 200, json.dumps({"id": 101, "created_at": "2026-10-20T09:00:00Z"}).encode()
+        if "/api/v1/cti/" in url:
+            return 200, b"{}"
+        return 404, b"{}"
+
+
+class TestVoicemailDistribution(unittest.TestCase):
+    def setUp(self):
+        import bridge_core
+        self._orig_esl = bridge_core.esl_command
+        bridge_core.esl_command = lambda cmd: None  # ESL down: all available
+        self.addCleanup(setattr, bridge_core, "esl_command", self._orig_esl)
+        self.tmp = tempfile.mkdtemp()
+        self.transport = DistTransport()
+        zammad = ZammadClient("http://zammad.local", "tok", transport=self.transport,
+                              cti_token="cti-tok")
+        self.bridge = Bridge(zammad=zammad,
+                             store=CallStore(os.path.join(self.tmp, "b.db")),
+                             recording_reader=lambda rec: b"RIFF-fake-wav" if rec.recording_path else None,
+                             rotation_agents=["8001", "8002", "8003"])
+
+    def _voicemail_owners(self):
+        posts = [json.loads(c[3]) for c in self.transport.calls
+                 if c[1].endswith("/api/v1/tickets")]
+        return [p.get("owner_id") for p in posts if p.get("ticket_type") == "语音留言"]
+
+    def test_fewest_calls_gets_next_voicemail(self):
+        """8001 answered 2 calls; the next voicemails go 8002, then
+        8003, then 8002 again once 8002/8003 tie at one each."""
+        for i in (1, 2):
+            out = self.bridge.handle_cdr({**CDR, "uuid": f"call-{i}",
+                                          "caller_id_number": f"1380000000{i}",
+                                          "cc_agent": "8001"})
+            self.assertTrue(out["ok"])
+        owners = []
+        for i, uuid in enumerate(("vm-a", "vm-b", "vm-c")):
+            out = self.bridge.handle_voicemail({**VM, "uuid": uuid,
+                                                "caller_id_number": f"1390000000{i}"})
+            self.assertTrue(out["ok"])
+            owners.append(out["owner_id"])
+        self.assertEqual(owners, [12, 13, 12])
+        self.assertEqual(self._voicemail_owners(), [12, 13, 12])
+
+    def test_busy_seat_is_skipped(self):
+        import bridge_core
+        bridge_core.esl_command = lambda cmd: (
+            "name|type|contact|status|state\n"
+            "8001|callback|user/8001|On Break|Waiting\n"
+            "8002|callback|user/8002|Available|Waiting\n"
+            "8003|callback|user/8003|Available|Waiting\n")
+        out = self.bridge.handle_voicemail({**VM, "uuid": "vm-busy"})
+        self.assertEqual(out["owner_id"], 12)
+
+    def test_all_busy_leaves_ticket_unowned(self):
+        import bridge_core
+        bridge_core.esl_command = lambda cmd: (
+            "name|type|contact|status|state\n"
+            "8001|callback|user/8001|On Break|Waiting\n"
+            "8002|callback|user/8002|On Break|Waiting\n"
+            "8003|callback|user/8003|On Break|Waiting\n")
+        out = self.bridge.handle_voicemail({**VM, "uuid": "vm-allbusy"})
+        self.assertTrue(out["ok"])
+        self.assertIsNone(out["owner_id"])
+
+    def test_unknown_login_does_not_block_rotation(self):
+        self.bridge.rotation_agents = ["8009", "8001"]
+        first = self.bridge.handle_voicemail({**VM, "uuid": "vm-u1"})
+        second = self.bridge.handle_voicemail({**VM, "uuid": "vm-u2"})
+        self.assertIsNone(first["owner_id"])
+        self.assertEqual(second["owner_id"], 11)
+
+    def test_no_roster_leaves_ticket_unowned(self):
+        self.bridge.rotation_agents = []
+        out = self.bridge.handle_voicemail({**VM, "uuid": "vm-noroster"})
+        self.assertTrue(out["ok"])
+        self.assertIsNone(out["owner_id"])
+
+
+class TestAgentHistory(unittest.TestCase):
+    def setUp(self):
+        import bridge_core
+        self._orig_esl = bridge_core.esl_command
+        bridge_core.esl_command = lambda cmd: None
+        self.addCleanup(setattr, bridge_core, "esl_command", self._orig_esl)
+        self.transport = DistTransport()
+        zammad = ZammadClient("http://zammad.local", "tok", transport=self.transport,
+                              cti_token="cti-tok")
+        self.bridge = Bridge(zammad=zammad,
+                             store=CallStore(os.path.join(tempfile.mkdtemp(), "b.db")),
+                             recording_reader=lambda rec: b"RIFF-fake-wav" if rec.recording_path else None,
+                             rotation_agents=["8001", "8002", "8003"])
+
+    def test_stats_and_history_are_per_seat(self):
+        now = str(int(time.time()))
+        for i in (1, 2):
+            self.bridge.handle_cdr({**CDR, "uuid": f"today-{i}",
+                                    "caller_id_number": f"1380000000{i}",
+                                    "cc_agent": "8001", "start_epoch": now})
+        self.bridge.handle_cdr({**CDR, "uuid": "old-1",
+                                "caller_id_number": "13800000009",
+                                "cc_agent": "8001", "start_epoch": "1577836800"})
+        self.bridge.handle_cdr({**CDR, "uuid": "other-seat",
+                                "caller_id_number": "13800000008",
+                                "cc_agent": "8002", "start_epoch": now})
+        # Fewest handled wins: 8001 has 3 calls, 8002 has 1, 8003 has 0.
+        vm = self.bridge.handle_voicemail({**VM, "uuid": "vm-h1"})
+        self.assertEqual(vm["owner_id"], 13)
+        mine = self.bridge.get_agent_history("8001")
+        self.assertEqual(mine["stats"]["calls_today"], 2)
+        self.assertEqual(mine["stats"]["calls_total"], 3)
+        self.assertEqual(mine["stats"]["voicemails"], 0)
+        self.assertEqual(len(mine["history"]), 3)
+        self.assertTrue(all(r["kind"] == "电话" for r in mine["history"]))
+        other = self.bridge.get_agent_history("8002")
+        self.assertEqual(other["stats"]["calls_today"], 1)
+        self.assertEqual(other["stats"]["voicemails"], 0)
+        self.assertTrue(all(r["kind"] == "电话" for r in other["history"]))
+        self.assertNotIn("13800000009", [r["caller"] for r in other["history"]])
+        third = self.bridge.get_agent_history("8003")
+        self.assertEqual(third["stats"]["voicemails"], 1)
+        self.assertEqual(len(third["history"]), 1)
+        self.assertEqual(third["history"][0]["kind"], "留言")
 
 
 if __name__ == "__main__":

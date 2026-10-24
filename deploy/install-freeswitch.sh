@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install FreeSWITCH (internal test: extensions 8001-8005, queue 8000,
+# Install FreeSWITCH (internal test: extensions 8001-8003, queue 8000,
 # voicemail 8009) on the bike call-center server. English output only.
 # Safe to re-run: extension passwords and the event-socket password are
 # kept when they already exist, so softphones keep working.
@@ -24,7 +24,7 @@ rand_hex() {
 echo "[3/6] Extension passwords (reused when already set)..."
 if [ ! -f freeswitch/extensions.txt ]; then
   : > freeswitch/extensions.txt
-  for ext in 8001 8002 8003 8004 8005; do
+  for ext in 8001 8002 8003; do
     echo "$ext $(rand_hex)" >> freeswitch/extensions.txt
   done
 fi
@@ -121,7 +121,7 @@ echo ""
 echo "DONE. Next steps:"
 echo "  1) Security group (cloud console): allow inbound UDP 5060 and UDP 16384-16884."
 echo "  2) Softphone (MicroSIP / Zoiper / Linphone): server 36.139.118.227,"
-echo "     user 8001..8005, password from /opt/bike-callcenter/freeswitch/extensions.txt,"
+echo "     user 8001..8003, password from /opt/bike-callcenter/freeswitch/extensions.txt,"
 echo "     transport UDP, codecs PCMA/PCMU."
 echo "  3) Test: 8001 calls 8002 (seat to seat), then 8001 calls 8000 (queue)."
 echo "     The queue call must pop a ticket on the agent board during the call."

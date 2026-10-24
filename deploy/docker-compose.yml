@@ -27,6 +27,10 @@ services:
       # here in phase 1). Phase 2: point FreeSWITCH to record into this
       # host directory, or replace with its recordings path.
       - ../recordings:/recordings
+      # Read-only view of the FreeSWITCH tree so the bridge can read the
+      # server-side event-socket password (esl-password.txt, gitignored)
+      # for agent busy control; no restart needed when it appears.
+      - ../freeswitch:/freeswitch-config:ro
 
   freeswitch:
     build: ../freeswitch

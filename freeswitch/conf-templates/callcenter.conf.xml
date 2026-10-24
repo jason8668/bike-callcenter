@@ -5,10 +5,11 @@
   </settings>
   <queues>
     <queue name="客服队列">
-      <!-- Round-robin: seats take turns (first of the three answering
-           strategies; longest-idle and fewest-calls are one-word
-           changes to this value). -->
-      <param name="strategy" value="round-robin"/>
+      <!-- Fewest-calls: the seat that handled the fewest calls gets the
+           next one, until all three counts are equal, then it cycles.
+           Busy (On Break) and logged-out seats are skipped by the
+           queue automatically. -->
+      <param name="strategy" value="agent-with-fewest-calls"/>
       <param name="moh-sound" value="tone_stream://%(1000,1000,440)"/>
       <param name="time-base-score" value="system"/>
       <param name="max-wait-time" value="60"/>
@@ -25,14 +26,10 @@
     <agent name="8001" type="callback" contact="user/8001" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
     <agent name="8002" type="callback" contact="user/8002" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
     <agent name="8003" type="callback" contact="user/8003" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
-    <agent name="8004" type="callback" contact="user/8004" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
-    <agent name="8005" type="callback" contact="user/8005" status="Available" max-no-answer="3" wrap-up-time="10" reject-delay-time="10" busy-delay-time="60" no-answer-delay-time="60"/>
   </agents>
   <tiers>
     <tier agent="8001" queue="客服队列" level="1" position="1"/>
     <tier agent="8002" queue="客服队列" level="1" position="2"/>
     <tier agent="8003" queue="客服队列" level="1" position="3"/>
-    <tier agent="8004" queue="客服队列" level="1" position="4"/>
-    <tier agent="8005" queue="客服队列" level="1" position="5"/>
   </tiers>
 </configuration>

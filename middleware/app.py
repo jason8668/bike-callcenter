@@ -43,12 +43,19 @@ def read_recording(rec) -> bytes | None:
 
 
 _TICKET_CUSTOMER_ID = os.environ.get("TICKET_CUSTOMER_ID", "")
+# Seat logins in roster order for voicemail dispatch (fewest-calls).
+# Keep these equal to the agent Zammad logins (seat numbers by default)
+# so queue CDRs (cc_agent) line up with the roster.
+_ROTATION_AGENTS = [a.strip() for a in
+                    os.environ.get("ROTATION_AGENTS", "8001,8002,8003").split(",")
+                    if a.strip()]
 bridge = Bridge(
     zammad=ZammadClient(
         ZAMMAD_URL, ZAMMAD_TOKEN, cti_token=ZAMMAD_CTI_TOKEN,
         ticket_customer_id=int(_TICKET_CUSTOMER_ID) if _TICKET_CUSTOMER_ID.isdigit() else None),
     store=CallStore(DB_PATH),
     recording_reader=read_recording,
+    rotation_agents=_ROTATION_AGENTS,
 )
 
 app = FastAPI(title="bike-callcenter bridge", version="1.0.0")
@@ -587,6 +594,24 @@ BOARD_PAGE_HTML = """<!DOCTYPE html>
 <div id="alert"></div>
 <div id="recent"></div>
 
+<h2 style="font-size:16px;margin-top:28px;">我的坐席状态</h2>
+<p class="hint">有事离开时把自己置忙，队列和留言就不再分给你，只分给其他坐席；回来点“置闲”恢复。
+也可以直接在话机上拨 *51 置忙、*52 置闲。</p>
+<label>我是几号坐席</label>
+<select id="seat" style="width:100%;padding:9px;font-size:15px;">
+  <option value="8001">8001</option>
+  <option value="8002">8002</option>
+  <option value="8003">8003</option>
+</select>
+<button id="busyBtn" style="background:#666;">置忙</button>
+<div id="seatStatus" style="margin-top:12px;font-size:14px;line-height:1.9;"></div>
+
+<h2 style="font-size:16px;margin-top:28px;">我的接单统计与历史</h2>
+<p class="hint">这里是你自己接过的电话和分给你的留言：今日接听、累计接听、分派留言数，
+下面是最近 50 条记录（点工单号可打开原工单）。</p>
+<div id="myStats" style="margin-top:12px;font-size:14px;line-height:1.9;"></div>
+<div id="myHistory" style="margin-top:12px;font-size:14px;line-height:1.9;"></div>
+
 <script>
 let baseline = 0, watching = false, timer = null, audioCtx = null;
 const params = new URLSearchParams(location.search);
@@ -634,9 +659,63 @@ async function poll() {
     setTimeout(() => { location.href = zammadTicketUrl(newest.ticket_id); }, 2000);
   }
 }
+const seatSel = document.getElementById("seat");
+seatSel.value = localStorage.getItem("board_seat") || "8001";
+seatSel.onchange = () => { localStorage.setItem("board_seat", seatSel.value); refreshSeat(); refreshHistory(); };
+async function refreshSeat() {
+  const secret = document.getElementById("secret").value.trim();
+  if (!secret) return;
+  let resp;
+  try { resp = await fetch("/agents/status", { headers: { "X-Bridge-Secret": secret } }); }
+  catch (e) { return; }
+  if (!resp.ok) return;
+  const data = await resp.json();
+  const agents = data.agents || {};
+  const mine = agents[seatSel.value];
+  const btn = document.getElementById("busyBtn");
+  btn.textContent = mine === "On Break" ? "置闲（恢复接单）" : "置忙";
+  btn.style.background = mine === "On Break" ? "#0e7a5f" : "#666";
+  const label = s => s === "Available" ? "接单中" : s === "On Break" ? "置忙" :
+    s === "Logged Out" ? "未登录" : "未知";
+  document.getElementById("seatStatus").innerHTML = Object.keys(agents).map(a =>
+    "<div>" + a + "：" + label(agents[a]) + (a === seatSel.value ? "（我）" : "") + "</div>"
+  ).join("") || "状态暂时查不到（话务层没接通时不影响看板弹单）。";
+}
+async function refreshHistory() {
+  const secret = document.getElementById("secret").value.trim();
+  if (!secret) return;
+  let resp;
+  try { resp = await fetch("/agents/me?seat=" + encodeURIComponent(seatSel.value),
+    { headers: { "X-Bridge-Secret": secret } }); }
+  catch (e) { return; }
+  if (!resp.ok) return;
+  const data = await resp.json();
+  const s = data.stats || {};
+  document.getElementById("myStats").innerHTML =
+    "今日接听 " + (s.calls_today || 0) + " 通 · 累计接听 " + (s.calls_total || 0) +
+    " 通 · 分派留言 " + (s.voicemails || 0) + " 条";
+  const rows = data.history || [];
+  document.getElementById("myHistory").innerHTML = rows.map(r =>
+    "<div>" + (r.time || "") + " " + r.kind + " " + r.caller + " " + (r.duration || "") +
+    (r.ticket_id ? " <a target='_blank' href='" + zammadTicketUrl(r.ticket_id) +
+      "'>工单 #" + r.ticket_id + "</a>" : "") + "</div>"
+  ).join("") || "暂无记录。";
+}
+document.getElementById("busyBtn").onclick = async () => {
+  const secret = document.getElementById("secret").value.trim();
+  if (!secret) { alert("请先在上面填访问密钥。"); return; }
+  const busy = document.getElementById("busyBtn").textContent === "置忙";
+  const resp = await fetch("/agents/busy", { method: "POST",
+    headers: { "X-Bridge-Secret": secret, "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: seatSel.value, busy }) });
+  if (!resp.ok) { alert("设置失败，请看话务层是否在运行。"); return; }
+  localStorage.setItem("board_seat", seatSel.value);
+  refreshSeat();
+};
 document.getElementById("go").onclick = async () => {
   const secret = document.getElementById("secret").value.trim();
   localStorage.setItem("bridge_secret", secret);
+  localStorage.setItem("board_seat", seatSel.value);
   try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
   document.getElementById("status").textContent = "值班中，正在等来电…";
   document.getElementById("go").disabled = true;
@@ -649,6 +728,10 @@ document.getElementById("go").onclick = async () => {
   watching = true;
   timer = setInterval(poll, 2000);
   poll();
+  refreshSeat();
+  refreshHistory();
+  setInterval(refreshSeat, 10000);
+  setInterval(refreshHistory, 10000);
 };
 </script>
 </body>
@@ -667,3 +750,41 @@ def board_feed(x_bridge_secret: str | None = Header(default=None)):
     """Newest ticketed calls, newest first (secret-protected)."""
     check_secret(x_bridge_secret)
     return {"tickets": bridge.store.recent_tickets(20)}
+
+
+@app.get("/agents/status")
+def agents_status(x_bridge_secret: str | None = Header(default=None)):
+    """Queue status per roster seat (secret-protected)."""
+    check_secret(x_bridge_secret)
+    return {"agents": bridge.get_agent_statuses()}
+
+
+@app.get("/agents/me")
+def agents_me(seat: str, x_bridge_secret: str | None = Header(default=None)):
+    """One seat's homepage data: calls answered (today / total),
+    voicemails dispatched, and handled-contact history (secret-
+    protected). Seat must be on the roster."""
+    check_secret(x_bridge_secret)
+    if seat not in bridge.rotation_agents:
+        raise HTTPException(status_code=400, detail="unknown seat")
+    return bridge.get_agent_history(seat)
+
+
+@app.post("/agents/busy")
+async def agents_busy(request: Request, x_bridge_secret: str | None = Header(default=None)):
+    """Set one seat On Break (busy) or Available (secret-protected).
+    Body: {"agent": "8001", "busy": true}. Busy seats are skipped by
+    the queue and by voicemail dispatch until set back."""
+    check_secret(x_bridge_secret)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    agent = str((body or {}).get("agent") or "")
+    busy = bool((body or {}).get("busy"))
+    if agent not in bridge.rotation_agents:
+        raise HTTPException(status_code=400, detail="unknown seat")
+    ok, status = bridge.set_agent_busy(agent, busy)
+    if not ok:
+        raise HTTPException(status_code=502, detail=status)
+    return {"ok": True, "agent": agent, "status": status}

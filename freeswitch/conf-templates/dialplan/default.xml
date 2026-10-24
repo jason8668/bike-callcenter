@@ -5,9 +5,25 @@
          only creates tickets for legs carrying bridge_ticket=1 (the
          queue below), so internal calls land in statistics only. -->
     <extension name="internal">
-      <condition field="destination_number" expression="^(800[1-5])$">
+      <condition field="destination_number" expression="^(800[1-3])$">
         <action application="set" data="hangup_after_bridge=true"/>
         <action application="bridge" data="sofia/internal/${destination_number}"/>
+      </condition>
+    </extension>
+
+    <!-- Seat busy control from the agent's own phone: *51 sets the
+         calling seat On Break (queue + voicemail skip it), *52 sets it
+         back to Available. The board page offers the same toggle. -->
+    <extension name="set-busy">
+      <condition field="destination_number" expression="^\*51$">
+        <action application="lua" data="zammad_agent_status.lua busy"/>
+        <action application="hangup"/>
+      </condition>
+    </extension>
+    <extension name="set-free">
+      <condition field="destination_number" expression="^\*52$">
+        <action application="lua" data="zammad_agent_status.lua free"/>
+        <action application="hangup"/>
       </condition>
     </extension>
 

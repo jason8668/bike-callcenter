@@ -34,6 +34,76 @@ def urllib_transport(method: str, url: str, headers: dict, body: Optional[bytes]
         return e.code, e.read()
 
 
+def esl_command(command: str) -> Optional[str]:
+    """One FreeSWITCH event-socket API call (stdlib socket, no deps).
+    The socket binds 127.0.0.1 on the host; from the bridge container it
+    is reachable at host.docker.internal:8021. The password comes from
+    ESL_PASSWORD, else the server-side freeswitch/esl-password.txt
+    mounted read-only at /freeswitch-config (never in Git). Any failure
+    (no socket, bad auth, timeout) yields None so callers fall back."""
+    import socket
+    password = os.environ.get("ESL_PASSWORD", "")
+    if not password:
+        try:
+            with open("/freeswitch-config/esl-password.txt") as f:
+                password = f.read().strip()
+        except OSError:
+            password = ""
+    if not password:
+        return None
+    host = os.environ.get("ESL_HOST", "host.docker.internal")
+    try:
+        port = int(os.environ.get("ESL_PORT", "8021"))
+    except ValueError:
+        port = 8021
+    try:
+        sock = socket.create_connection((host, port), timeout=5)
+        buf = b""
+
+        def read_block() -> bytes:
+            nonlocal buf
+            while b"\n\n" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("esl closed")
+                buf += chunk
+            head, buf = buf.split(b"\n\n", 1)
+            return head
+
+        def read_body() -> bytes:
+            nonlocal buf
+            head = read_block()
+            length = 0
+            for line in head.decode(errors="replace").splitlines():
+                if line.lower().startswith("content-length:"):
+                    try:
+                        length = int(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        length = 0
+            while len(buf) < length:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            body, buf = buf[:length], buf[length:]
+            return body
+
+        read_block()  # auth/request banner
+        sock.sendall(f"auth {password}\n\n".encode())
+        if b"+OK" not in read_block():
+            raise ConnectionError("esl auth rejected")
+        sock.sendall(f"api {command}\n\n".encode())
+        body = read_body()
+        try:
+            sock.sendall(b"exit\n\n")
+        except OSError:
+            pass
+        sock.close()
+        return body.decode(errors="replace")
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- CDR parsing
 
 @dataclass
@@ -160,6 +230,19 @@ class CallStore:
                 c.execute("ALTER TABLE calls ADD COLUMN callee TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass  # column already exists
+            # agent (answering seat, from the queue CDR's cc_agent) feeds
+            # the fewest-calls distribution: answered calls per agent.
+            try:
+                c.execute("ALTER TABLE calls ADD COLUMN agent TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            # owner_id (Zammad user id of the dispatched seat) lets the
+            # board show an agent their assigned voicemails, whose CDR
+            # legs carry no agent.
+            try:
+                c.execute("ALTER TABLE calls ADD COLUMN owner_id INTEGER")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             # recording_attached tracks whether the hangup CDR already
             # attached the recording to the answer-time ticket, so a
             # duplicate CDR does not attach it twice.
@@ -167,6 +250,12 @@ class CallStore:
                 c.execute("ALTER TABLE calls ADD COLUMN recording_attached INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass  # column already exists
+            # meta holds small persistent counters, e.g. the voicemail
+            # round-robin position (must survive bridge restarts).
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS meta ("
+                " key TEXT PRIMARY KEY, value TEXT)"
+            )
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -185,6 +274,37 @@ class CallStore:
     def mark_recording_attached(self, call_id: str) -> None:
         with self._conn() as c:
             c.execute("UPDATE calls SET recording_attached=1 WHERE call_id=?", (call_id,))
+
+    def meta_get(self, key: str, default: str = "") -> str:
+        with self._conn() as c:
+            row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def meta_set(self, key: str, value: str) -> None:
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                      (key, value))
+
+    def meta_incr(self, key: str) -> int:
+        """Increment a meta counter, returning the new value."""
+        try:
+            new = int(self.meta_get(key, "0")) + 1
+        except ValueError:
+            new = 1
+        self.meta_set(key, str(new))
+        return new
+
+    def answered_calls_by_agent(self, agent: str) -> int:
+        """Answered inbound calls handled by one agent (the queue CDRs
+        carry the answering agent in cc_agent). Internal calls and
+        voicemail legs carry no agent and are never counted."""
+        if not agent:
+            return 0
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) FROM calls WHERE answered=1 AND agent=?",
+                (agent,)).fetchone()
+        return row[0] if row else 0
 
     def recent_tickets(self, limit: int = 20) -> list[dict]:
         """Newest ticketed calls first, for the agent board feed:
@@ -208,19 +328,61 @@ class CallStore:
                 "ORDER BY rowid DESC LIMIT ?", (phone, limit)).fetchall()
         return [r[0] for r in rows]
 
-    def record(self, rec: CallRecord, ticket_id: Optional[int]) -> None:
+    def record(self, rec: CallRecord, ticket_id: Optional[int],
+               owner_id: Optional[int] = None) -> None:
         with self._conn() as c:
             c.execute(
                 "INSERT INTO calls (call_id, ticket_id, caller, callee, direction, answered,"
-                " duration_sec, wait_sec, start_epoch) VALUES (?,?,?,?,?,?,?,?,?)"
+                " duration_sec, wait_sec, start_epoch, agent, owner_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(call_id) DO UPDATE SET"
                 " ticket_id=COALESCE(excluded.ticket_id, calls.ticket_id),"
                 " callee=excluded.callee,"
                 " answered=excluded.answered, duration_sec=excluded.duration_sec,"
-                " wait_sec=excluded.wait_sec",
+                " wait_sec=excluded.wait_sec, agent=excluded.agent,"
+                " owner_id=COALESCE(excluded.owner_id, calls.owner_id)",
                 (rec.call_id, ticket_id, rec.caller, rec.callee, rec.direction,
-                 1 if rec.answered else 0, rec.duration_sec, rec.wait_sec, rec.start_epoch),
+                 1 if rec.answered else 0, rec.duration_sec, rec.wait_sec, rec.start_epoch,
+                 rec.agent, owner_id),
             )
+
+    def agent_stats(self, agent: str, today_start: int) -> dict:
+        """One seat's handled contacts: answered calls today / total,
+        plus assigned voicemails (bridge-tracked, since voicemail legs
+        carry no agent)."""
+        with self._conn() as c:
+            today = c.execute(
+                "SELECT COUNT(*) FROM calls WHERE answered=1 AND agent=? "
+                "AND start_epoch>=?", (agent, today_start)).fetchone()[0]
+            total = c.execute(
+                "SELECT COUNT(*) FROM calls WHERE answered=1 AND agent=?",
+                (agent,)).fetchone()[0]
+        try:
+            vm = int(self.meta_get(f"vm_assigned:{agent}", "0"))
+        except ValueError:
+            vm = 0
+        return {"calls_today": today, "calls_total": total, "voicemails": vm}
+
+    def agent_history(self, agent: str, user_id: Optional[int], limit: int = 50) -> list[dict]:
+        """One seat's handled contacts, newest first: answered queue
+        calls (by cc_agent) plus assigned voicemails (by owner id).
+        Missed calls and other seats' contacts never appear."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT caller, duration_sec, start_epoch, ticket_id, owner_id FROM calls "
+                "WHERE (answered=1 AND agent=?) OR (owner_id IS NOT NULL AND owner_id=?) "
+                "ORDER BY rowid DESC LIMIT ?",
+                (agent, user_id if user_id else -1, limit)).fetchall()
+        out = []
+        for caller, dur, start, tid, owner in rows:
+            out.append({
+                "caller": caller,
+                "kind": "留言" if owner is not None else "电话",
+                "duration": fmt_duration(dur or 0),
+                "time": fmt_cst(start or 0),
+                "ticket_id": tid,
+            })
+        return out
 
     def list_calls(self, start_epoch: int = 0) -> list:
         """Call rows for the Excel export, oldest first:
@@ -378,6 +540,22 @@ class ZammadClient:
                     return u.get("id")
         return None
 
+    def find_user_by_login(self, login: str) -> Optional[int]:
+        """User id for an exact login match (seat accounts are created
+        with login=username, so a seat number resolves to its agent).
+        None when the login does not exist or the lookup fails."""
+        if not login:
+            return None
+        try:
+            status, users = self._call("GET", "/api/v1/users?limit=100")
+        except Exception:
+            return None
+        if status == 200 and isinstance(users, list):
+            for u in users:
+                if isinstance(u, dict) and u.get("login") == login:
+                    return u.get("id")
+        return None
+
     # -- agent accounts -------------------------------------------------------
     def create_agent(self, login: str, password: str) -> tuple[Optional[int], str]:
         """Create an agent account from just a login + password (no
@@ -419,7 +597,8 @@ class ZammadClient:
                                      recording_bytes: Optional[bytes] = None,
                                      recording_filename: str = "",
                                      history_note: str = "",
-                                     in_progress: bool = False) -> Optional[int]:
+                                     in_progress: bool = False,
+                                     owner_id: Optional[int] = None) -> Optional[int]:
         """Ticket for a call. in_progress=True means the call is still
         going on (ticket opened at answer time): the article says so and
         the recording is attached later, when the CDR arrives."""
@@ -483,6 +662,10 @@ class ZammadClient:
             # Also stamp the 工单类型 attribute (agents can still change it);
             # voicemail tickets rely on it for the 语音留言 overview filter.
             payload["ticket_type"] = rec.ticket_type
+        if owner_id:
+            # Round-robin dispatch (voicemail): the ticket is owned by
+            # the agent whose turn it is, not left for anyone to pick.
+            payload["owner_id"] = owner_id
         status, data = self._call("POST", "/api/v1/tickets", payload)
         if status in (200, 201) and isinstance(data, dict):
             self.last_ticket_error = ""
@@ -565,6 +748,91 @@ class Bridge:
     store: CallStore
     recording_reader: Callable[[CallRecord], Optional[bytes]] = field(
         default=lambda rec: None)  # app.py injects a filesystem/HTTP reader
+    # Seat logins in roster order (env ROTATION_AGENTS, default the
+    # three seats). Voicemail tickets are dispatched to the roster
+    # member with the fewest handled contacts; agent Zammad logins
+    # should equal seat numbers so queue CDRs (cc_agent) line up.
+    rotation_agents: list = field(default_factory=list)
+
+    def _agent_statuses(self) -> dict:
+        """Seat -> FreeSWITCH agent status (Available / On Break /
+        Logged Out), via the event socket. {} when ESL is unreachable;
+        callers then treat every seat as available."""
+        out = esl_command("callcenter_config agent list")
+        if not out:
+            return {}
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        if not lines:
+            return {}
+        header = [h.strip() for h in lines[0].split("|")]
+        try:
+            name_i = header.index("name")
+            status_i = header.index("status")
+        except ValueError:
+            return {}
+        statuses = {}
+        for ln in lines[1:]:
+            cols = [c.strip() for c in ln.split("|")]
+            if len(cols) > max(name_i, status_i):
+                statuses[cols[name_i]] = cols[status_i]
+        return statuses
+
+    def get_agent_statuses(self) -> dict:
+        """Roster logins mapped to their queue status (or 'unknown'
+        when ESL cannot be reached)."""
+        statuses = self._agent_statuses()
+        return {a: statuses.get(a, "unknown") for a in self.rotation_agents}
+
+    def get_agent_history(self, seat: str) -> dict:
+        """One seat's homepage data: how many calls they answered
+        (today / total), how many voicemails were dispatched to them,
+        and their handled-contact history, newest first."""
+        cst = timezone(timedelta(hours=8))
+        midnight = datetime.now(cst).replace(hour=0, minute=0, second=0, microsecond=0)
+        uid = self.zammad.find_user_by_login(seat)
+        return {
+            "seat": seat,
+            "stats": self.store.agent_stats(seat, int(midnight.timestamp())),
+            "history": self.store.agent_history(seat, uid),
+        }
+
+    def set_agent_busy(self, agent: str, busy: bool) -> tuple[bool, str]:
+        """Set one seat On Break (busy) or Available, via the queue.
+        Returns (ok, status-or-error)."""
+        target = "On Break" if busy else "Available"
+        out = esl_command(f"callcenter_config agent set status {agent} '{target}'")
+        if out and out.strip().startswith("+OK"):
+            return True, target
+        return False, (out or "event socket unreachable").strip()[:200]
+
+    def _next_voicemail_owner(self) -> Optional[int]:
+        """Fewest-calls dispatch for a voicemail ticket: among seats
+        that are Available right now (busy seats are skipped), pick the
+        one with the fewest handled contacts (answered queue calls +
+        previously assigned voicemails); ties go by roster order. The
+        winner's voicemail count advances even when its login does not
+        resolve, so one misconfigured seat cannot block the rest."""
+        roster = [a for a in self.rotation_agents if a]
+        if not roster:
+            return None
+        statuses = self._agent_statuses()
+        if statuses:
+            candidates = [a for a in roster if statuses.get(a) == "Available"]
+        else:
+            candidates = list(roster)  # ESL down: assume all available
+        if not candidates:
+            return None
+
+        def handled(a: str) -> int:
+            try:
+                vm = int(self.store.meta_get(f"vm_assigned:{a}", "0"))
+            except ValueError:
+                vm = 0
+            return self.store.answered_calls_by_agent(a) + vm
+
+        pick = min(candidates, key=lambda a: (handled(a), roster.index(a)))
+        self.store.meta_incr(f"vm_assigned:{pick}")
+        return self.zammad.find_user_by_login(pick)
 
     def handle_event(self, event: str, payload: dict) -> dict:
         rec = parse_cdr(payload)
@@ -594,7 +862,8 @@ class Bridge:
                     "ticket_id": ticket_id, "history_hint": history_note}
         return {"ok": True, "call_id": rec.call_id, "event": event}
 
-    def _bind_ticket(self, rec: CallRecord, in_progress: bool = False) -> tuple[Optional[int], bool, str]:
+    def _bind_ticket(self, rec: CallRecord, in_progress: bool = False,
+                     owner_id: Optional[int] = None) -> tuple[Optional[int], bool, str]:
         """Create the Zammad ticket for an answered contact (call or
         voicemail): recording attached, returning-caller keyword hint
         stamped on top. Returns (ticket_id, recording_attached, hint).
@@ -616,7 +885,7 @@ class Bridge:
             history_note = ""
         ticket_id = self.zammad.create_ticket_with_recording(
             rec, customer_id, recording, filename, history_note=history_note,
-            in_progress=in_progress)
+            in_progress=in_progress, owner_id=owner_id)
         return ticket_id, recording is not None, history_note
 
     def handle_cdr(self, payload: dict) -> dict:
@@ -699,11 +968,16 @@ class Bridge:
         if existing:
             return {"ok": True, "call_id": rec.call_id, "ticket_id": existing,
                     "note": "already bound", "voicemail": True}
-        ticket_id, attached, history_note = self._bind_ticket(rec)
+        # Like a call, a voicemail counts as one contact for the
+        # distribution: it is dispatched to the Available seat with the
+        # fewest handled contacts (busy seats are skipped). No roster
+        # or no Available seat leaves the ticket unowned in the group.
+        owner_id = self._next_voicemail_owner()
+        ticket_id, attached, history_note = self._bind_ticket(rec, owner_id=owner_id)
         if ticket_id is None:
             return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed",
                     "zammad_error": self.zammad.last_ticket_error}
-        self.store.record(rec, ticket_id)
+        self.store.record(rec, ticket_id, owner_id=owner_id)
         return {"ok": True, "call_id": rec.call_id, "ticket_id": ticket_id,
                 "recording_attached": attached, "history_hint": history_note,
-                "voicemail": True}
+                "voicemail": True, "owner_id": owner_id}
