@@ -18,6 +18,9 @@ PAIRS = {
   'Average' => '平均',
   'Admin Documentation' => '管理员文档',
   'User Documentation' => '用户文档',
+  # Shipped zh-cn pack mistranslates this one into Traditional characters
+  # (輸入名字或電話號碼 快搜用戶.機構名稱); override with Simplified.
+  'Enter Person or Organization/Company' => '输入名字或电话号码，快搜用户/机构名称',
 }.freeze
 
 # New Translation rows require created_by/updated_by (NOT NULL columns);
