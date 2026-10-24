@@ -183,18 +183,11 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <body>
 <h1>模拟来电测试</h1>
 <p class="hint">还没有接电话线路时，用这个页面模拟一通客户来电：系统会像真来电一样
-弹出来电提示，通话结束后自动生成一张带录音附件的工单。</p>
+弹出来电提示，通话结束后自动生成一张带录音附件的工单。来电不带任何预分类：
+工单先进客服组，由坐席接听后在工单里填写服务类型等信息。</p>
 
 <label>客户手机号码</label>
 <input id="caller" value="13800000000">
-
-<label>问题类型（对应电话语音菜单按键）</label>
-<select id="ivr">
-  <option value="1">1 - 故障报修</option>
-  <option value="2">2 - 投诉建议</option>
-  <option value="3">3 - 业务咨询</option>
-  <option value="4">4 - 其他</option>
-</select>
 
 <label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
 <input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
@@ -243,8 +236,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
         method: "POST",
         headers: {"Content-Type": "application/json", "X-Bridge-Secret": secret},
         body: JSON.stringify({
-          caller_id_number: document.getElementById("caller").value.trim(),
-          ivr_choice: document.getElementById("ivr").value
+          caller_id_number: document.getElementById("caller").value.trim()
         })
       });
       const data = await resp.json();
@@ -258,7 +250,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       } else {
         box.className = "err";
         box.textContent = "没有生成工单：" + JSON.stringify(data) +
-          "（常见原因：密钥不对，或客服系统令牌还没配置好）";
+          "（括号里 zammad_error 就是客服系统返回的具体原因）";
       }
     } catch (e) {
       box.style.display = "block"; box.className = "err";
@@ -348,9 +340,11 @@ async def simulate(request: Request, x_bridge_secret: str | None = Header(defaul
     answer events, then posts a CDR so a Zammad ticket with the recording
     attached should appear. Safe to run repeatedly (unique call id each run).
 
-    Optional JSON body: {"caller_id_number": "138...", "ivr_choice": "1"}
-    (ivr_choice mirrors the IVR keys: 1 repair / 2 complaint / 3 consult /
-    4 other, and decides which Zammad group the ticket lands in.)
+    The call carries NO pre-classification (real calls arrive plain; the
+    agent classifies the ticket in Zammad afterwards), so the ticket lands
+    in 客服组 with no 工单类型 stamped. Optional JSON body:
+    {"caller_id_number": "138..."} (an "ivr_choice" override is still
+    accepted for future IVR tests, but the test page no longer sends one).
     """
     check_secret(x_bridge_secret)
     import struct
@@ -366,7 +360,7 @@ async def simulate(request: Request, x_bridge_secret: str | None = Header(defaul
     except Exception:
         pass
     caller = str(overrides.get("caller_id_number") or "13800000000")
-    ivr_choice = str(overrides.get("ivr_choice") or "1")
+    ivr_choice = str(overrides.get("ivr_choice") or "")
 
     call_id = str(uuidlib.uuid4())
     filename = f"{call_id}.wav"

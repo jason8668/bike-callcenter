@@ -17,6 +17,7 @@ import os
 import sqlite3
 import urllib.request
 import urllib.error
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -127,6 +128,12 @@ class CallStore:
                 " wait_sec INTEGER, start_epoch INTEGER, created_at TEXT"
                 " DEFAULT (datetime('now')))"
             )
+            # callee (the dialled number) was added for the Excel export;
+            # old databases simply gain the column, old rows keep "".
+            try:
+                c.execute("ALTER TABLE calls ADD COLUMN callee TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -139,15 +146,28 @@ class CallStore:
     def record(self, rec: CallRecord, ticket_id: Optional[int]) -> None:
         with self._conn() as c:
             c.execute(
-                "INSERT INTO calls (call_id, ticket_id, caller, direction, answered,"
-                " duration_sec, wait_sec, start_epoch) VALUES (?,?,?,?,?,?,?,?)"
+                "INSERT INTO calls (call_id, ticket_id, caller, callee, direction, answered,"
+                " duration_sec, wait_sec, start_epoch) VALUES (?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(call_id) DO UPDATE SET"
                 " ticket_id=COALESCE(excluded.ticket_id, calls.ticket_id),"
+                " callee=excluded.callee,"
                 " answered=excluded.answered, duration_sec=excluded.duration_sec,"
                 " wait_sec=excluded.wait_sec",
-                (rec.call_id, ticket_id, rec.caller, rec.direction,
+                (rec.call_id, ticket_id, rec.caller, rec.callee, rec.direction,
                  1 if rec.answered else 0, rec.duration_sec, rec.wait_sec, rec.start_epoch),
             )
+
+    def list_calls(self, start_epoch: int = 0) -> list:
+        """Call rows for the Excel export, oldest first:
+        (call_id, caller, callee, direction, answered, duration_sec,
+         wait_sec, start_epoch, ticket_id)."""
+        with self._conn() as c:
+            return c.execute(
+                "SELECT call_id, caller, COALESCE(callee,''), direction, answered,"
+                " duration_sec, wait_sec, start_epoch, ticket_id"
+                " FROM calls WHERE start_epoch >= ? ORDER BY start_epoch",
+                (start_epoch,),
+            ).fetchall()
 
     def daily_stats(self, date_prefix: str) -> dict:
         """Aggregate calls whose start falls on date_prefix (YYYY-MM-DD, UTC)."""
@@ -219,6 +239,10 @@ class ZammadClient:
         self.token = token
         self.cti_token = cti_token
         self.transport = transport
+        # Last ticket-create failure, surfaced to the test page so a failed
+        # simulate shows Zammad's real reason (status + message) instead of
+        # a generic "create failed". Contains no credentials.
+        self.last_ticket_error = ""
 
     def _headers(self, content_type="application/json"):
         return {"Authorization": f"Token token={self.token}", "Content-Type": content_type}
@@ -322,7 +346,9 @@ class ZammadClient:
             payload["ticket_type"] = rec.ticket_type
         status, data = self._call("POST", "/api/v1/tickets", payload)
         if status in (200, 201) and isinstance(data, dict):
+            self.last_ticket_error = ""
             return data.get("id")
+        self.last_ticket_error = f"HTTP {status}: {str(data)[:300]}"
         return None
 
     def add_recording_to_ticket(self, ticket_id: int, rec: CallRecord,
@@ -342,6 +368,44 @@ class ZammadClient:
             }]
         status, _ = self._call("POST", "/api/v1/ticket_articles", article)
         return status in (200, 201)
+
+    # -- exports ---------------------------------------------------------------
+    def search_tickets(self, query: str, page: int = 1, per_page: int = 100) -> list:
+        """One page of tickets matching a Zammad search query, as dicts.
+
+        Best-effort: any API error yields []. Mirrors customer_history's
+        tolerance for id-only search results."""
+        q = urllib.parse.quote(query, safe="")
+        status, data = self._call(
+            "GET", f"/api/v1/tickets/search?query={q}&page={page}&per_page={per_page}")
+        if status != 200 or not isinstance(data, list):
+            return []
+        tickets = []
+        for item in data:
+            if isinstance(item, dict):
+                tickets.append(item)
+            elif isinstance(item, int):
+                s2, t2 = self._call("GET", f"/api/v1/tickets/{item}")
+                if s2 == 200 and isinstance(t2, dict):
+                    tickets.append(t2)
+        return tickets
+
+    def id_name_map(self, path: str) -> dict:
+        """id -> name for /api/v1/ticket_states, /ticket_priorities, /groups."""
+        status, data = self._call("GET", path)
+        if status == 200 and isinstance(data, list):
+            return {i.get("id"): i.get("name") for i in data
+                    if isinstance(i, dict) and i.get("id") is not None}
+        return {}
+
+    def get_user_phone(self, user_id) -> str:
+        """Best-effort phone lookup for the export's 客户电话 column."""
+        if not user_id:
+            return ""
+        status, data = self._call("GET", f"/api/v1/users/{user_id}")
+        if status == 200 and isinstance(data, dict):
+            return str(data.get("phone") or "")
+        return ""
 
 
 # --------------------------------------------------------------- orchestrator
@@ -396,7 +460,8 @@ class Bridge:
                     "note": "already bound"}
         ticket_id, attached, history_note = self._bind_ticket(rec)
         if ticket_id is None:
-            return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed"}
+            return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed",
+                    "zammad_error": self.zammad.last_ticket_error}
         self.store.record(rec, ticket_id)
         return {"ok": True, "call_id": rec.call_id, "ticket_id": ticket_id,
                 "recording_attached": attached, "history_hint": history_note}
@@ -419,7 +484,8 @@ class Bridge:
                     "note": "already bound", "voicemail": True}
         ticket_id, attached, history_note = self._bind_ticket(rec)
         if ticket_id is None:
-            return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed"}
+            return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed",
+                    "zammad_error": self.zammad.last_ticket_error}
         self.store.record(rec, ticket_id)
         return {"ok": True, "call_id": rec.call_id, "ticket_id": ticket_id,
                 "recording_attached": attached, "history_hint": history_note,
