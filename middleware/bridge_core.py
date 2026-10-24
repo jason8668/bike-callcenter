@@ -166,6 +166,46 @@ class CallStore:
         }
 
 
+def summarize_history(tickets: list) -> str:
+    """Keyword hint built from a returning customer's past tickets.
+
+    Counts the fault types / problem types seen before and names the most
+    recent issue, e.g. for the agent answering a repeat call:
+    "该客户历史来电 3 次；故障关键词：锁故障×2、掉链×1；最近一次：故障报修（2026-10-20）"
+    Returns "" when there is no usable history.
+    """
+    faults: dict = {}
+    types: dict = {}
+    latest = None  # (created_at, label)
+    usable = 0
+    for t in tickets or []:
+        if not isinstance(t, dict):
+            continue
+        usable += 1
+        fault = str(t.get("fault_type") or "").strip()
+        ttype = str(t.get("ticket_type") or "").strip()
+        if fault:
+            faults[fault] = faults.get(fault, 0) + 1
+        if ttype:
+            types[ttype] = types.get(ttype, 0) + 1
+        label = ttype or fault
+        created = str(t.get("created_at") or "")
+        if label and (latest is None or created > latest[0]):
+            latest = (created, label)
+    if not usable:
+        return ""
+    parts = [f"该客户历史来电 {usable} 次"]
+    if faults:
+        ranked = sorted(faults.items(), key=lambda kv: -kv[1])
+        parts.append("故障关键词：" + "、".join(f"{k}×{v}" for k, v in ranked))
+    if types:
+        ranked = sorted(types.items(), key=lambda kv: -kv[1])
+        parts.append("问题类型：" + "、".join(f"{k}×{v}" for k, v in ranked))
+    if latest:
+        parts.append(f"最近一次：{latest[1]}（{latest[0][:10]}）")
+    return "；".join(parts)
+
+
 # --------------------------------------------------------------- Zammad API
 
 class ZammadClient:
@@ -218,15 +258,40 @@ class ZammadClient:
             return data.get("id")
         return None
 
+    def customer_history(self, customer_id: Optional[int], limit: int = 10) -> list:
+        """Recent tickets of this customer, for the history/keyword hint.
+
+        Best-effort: any API error yields []. Zammad's ticket search may
+        return full ticket objects or just ids depending on version, so
+        ids are resolved individually (capped)."""
+        if not customer_id:
+            return []
+        status, data = self._call(
+            "GET", f"/api/v1/tickets/search?query=customer_id:{customer_id}&limit={limit}")
+        if status != 200 or not isinstance(data, list):
+            return []
+        tickets = []
+        for item in data:
+            if isinstance(item, dict):
+                tickets.append(item)
+            elif isinstance(item, int) and len(tickets) < 5:
+                s2, t2 = self._call("GET", f"/api/v1/tickets/{item}")
+                if s2 == 200 and isinstance(t2, dict):
+                    tickets.append(t2)
+        return tickets
+
     # -- tickets ---------------------------------------------------------------
     def create_ticket_with_recording(self, rec: CallRecord, customer_id: Optional[int],
                                      recording_bytes: Optional[bytes] = None,
-                                     recording_filename: str = "") -> Optional[int]:
+                                     recording_filename: str = "",
+                                     history_note: str = "") -> Optional[int]:
         article_body = (
             f"来电自动建单\n主叫: {rec.caller} 被叫: {rec.callee}\n"
             f"CallID: {rec.call_id}\n通话时长: {rec.duration_sec}s\n"
             f"类型: {rec.ticket_type or '电话来电'}"
         )
+        if history_note:
+            article_body += f"\n历史提示: {history_note}"
         article: dict = {
             "subject": "通话记录", "body": article_body,
             "type": "phone", "internal": False,
@@ -306,10 +371,18 @@ class Bridge:
         recording = self.recording_reader(rec)
         filename = os.path.basename(rec.recording_path) if rec.recording_path else ""
         customer_id = self.zammad.find_or_create_customer(rec.caller)
+        # Returning caller: summarize past tickets into a keyword hint so
+        # the agent sees this customer's usual problems on the new ticket.
+        history_note = ""
+        try:
+            history_note = summarize_history(self.zammad.customer_history(customer_id))
+        except Exception:
+            history_note = ""
         ticket_id = self.zammad.create_ticket_with_recording(
-            rec, customer_id, recording, filename)
+            rec, customer_id, recording, filename, history_note=history_note)
         if ticket_id is None:
             return {"ok": False, "call_id": rec.call_id, "error": "zammad ticket create failed"}
         self.store.record(rec, ticket_id)
         return {"ok": True, "call_id": rec.call_id, "ticket_id": ticket_id,
-                "recording_attached": recording is not None}
+                "recording_attached": recording is not None,
+                "history_hint": history_note}

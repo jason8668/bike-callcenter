@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from bridge_core import Bridge, CallStore, ZammadClient, parse_cdr  # noqa: E402
+from bridge_core import Bridge, CallStore, ZammadClient, parse_cdr, summarize_history  # noqa: E402
 
 
 class FakeTransport:
@@ -89,6 +89,50 @@ class TestBridge(unittest.TestCase):
         cti = [c for c in self.transport.calls if "/api/v1/cti/" in c[1]]
         self.assertEqual(len(cti), 1)
         self.assertEqual(json.loads(cti[0][3])["callId"], "abc-123")
+
+
+class HistoryTransport(FakeTransport):
+    """Customer 7 has two past tickets; everyone else has none."""
+
+    HISTORY = [
+        {"id": 11, "fault_type": "锁故障", "ticket_type": "故障报修",
+         "created_at": "2026-10-18T09:00:00Z"},
+        {"id": 12, "fault_type": "锁故障", "ticket_type": "故障报修",
+         "created_at": "2026-10-20T09:00:00Z"},
+        {"id": 13, "fault_type": "掉链", "ticket_type": "故障报修",
+         "created_at": "2026-10-19T09:00:00Z"},
+    ]
+
+    def __call__(self, method, url, headers, body):
+        if "/api/v1/tickets/search?" in url:
+            self.calls.append((method, url, headers, body))
+            return 200, json.dumps(self.HISTORY).encode()
+        return super().__call__(method, url, headers, body)
+
+
+class TestHistoryHint(unittest.TestCase):
+    def test_summarize_history(self):
+        note = summarize_history(HistoryTransport.HISTORY)
+        self.assertIn("历史来电 3 次", note)
+        self.assertIn("锁故障×2", note)
+        self.assertIn("掉链×1", note)
+        self.assertIn("2026-10-20", note)
+        self.assertEqual(summarize_history([]), "")
+
+    def test_returning_caller_ticket_carries_hint(self):
+        tmp = tempfile.mkdtemp()
+        transport = HistoryTransport()
+        zammad = ZammadClient("http://zammad.local", "tok", transport=transport,
+                              cti_token="cti-tok")
+        bridge = Bridge(zammad=zammad, store=CallStore(os.path.join(tmp, "b.db")),
+                        recording_reader=lambda rec: b"RIFF-fake-wav")
+        out = bridge.handle_cdr({**CDR, "uuid": "repeat-1"})
+        self.assertTrue(out["ok"])
+        self.assertIn("锁故障×2", out["history_hint"])
+        ticket_posts = [c for c in transport.calls if c[1].endswith("/api/v1/tickets")]
+        payload = json.loads(ticket_posts[0][3])
+        self.assertIn("历史提示", payload["article"]["body"])
+        self.assertIn("锁故障×2", payload["article"]["body"])
 
 
 if __name__ == "__main__":
