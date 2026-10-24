@@ -7,7 +7,7 @@
 # - Elasticsearch disabled + per-container memory caps (see
 #   deploy/zammad-override.yml) so the course demo keeps its share
 # - Adds a 2G swap file if the host has none (burst protection)
-# - Builds and starts the bridge middleware (port 127.0.0.1:8090)
+# - Builds and starts the bridge middleware (host port 8890, /test page)
 # - FusionPBX is NOT installed by this script on a shared host: its
 #   installer takes over the host (nginx 80/443, system packages).
 #   Test phase 2 uses a plain FreeSWITCH container instead;
@@ -125,9 +125,9 @@ if [ ! -f .env ]; then
   SECRET=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
   sed -i "s/^BRIDGE_SECRET=.*/BRIDGE_SECRET=$SECRET/" .env
   echo "Bridge secret generated into middleware/.env"
-  echo "IMPORTANT: after Zammad first-run setup, create an API token and a"
-  echo "CTI token in Zammad admin, fill ZAMMAD_TOKEN / ZAMMAD_CTI_TOKEN in"
-  echo "$APP_DIR/middleware/.env, then run deploy/update-from-github.sh"
+  echo "IMPORTANT: after Zammad first-run setup, run"
+  echo "deploy/apply-cn-setup.sh once: it creates the API/CTI tokens,"
+  echo "writes them into middleware/.env, and sets up groups and fields."
 fi
 
 echo "[6/6] Build and start bridge"
@@ -139,13 +139,13 @@ echo "Zammad status:"
 (cd zammad && docker compose ps) || true
 echo "Bridge health:"
 sleep 3
-curl -s http://127.0.0.1:8090/health || echo "bridge not up yet, check: docker logs bike-bridge"
+curl -s http://127.0.0.1:8890/health || echo "bridge not up yet, check: docker logs bike-bridge"
 echo ""
 echo "Next steps:"
 echo " 1) Open http://<server-ip>:8899 and finish Zammad first-run setup."
 echo "    (Cloud security group must allow inbound TCP 8899 first.)"
-echo " 2) Create tokens, fill middleware/.env, run the field setup script:"
-echo "    ZAMMAD_URL=http://127.0.0.1:8899 ZAMMAD_TOKEN=xxx python3 $APP_DIR/zammad-setup/setup_bike_fields.py"
-echo " 3) Simulate one call to verify the whole chain:"
-echo "    curl -X POST http://127.0.0.1:8090/simulate/call -H \"X-Bridge-Secret: <secret from middleware/.env>\""
+echo " 2) Apply the one-shot configuration (language, channels, tokens, fields):"
+echo "    bash $APP_DIR/deploy/apply-cn-setup.sh"
+echo " 3) Open the simulated-call test page http://<server-ip>:8890/test"
+echo "    (security group must also allow inbound TCP 8890)."
 echo "Done."

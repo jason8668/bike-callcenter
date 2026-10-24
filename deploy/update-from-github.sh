@@ -10,6 +10,6 @@ echo "[2/3] rebuild bridge"
 cd "$APP_DIR/deploy"
 docker compose up -d --build bridge
 echo "[3/3] status"
-curl -s http://127.0.0.1:8090/health && echo ""
+curl -s http://127.0.0.1:8890/health && echo ""
 docker ps --format "table {{.Names}}\t{{.Status}}" | head -20
 echo "Update done. (Zammad stack itself is upgraded separately, see docs.)"

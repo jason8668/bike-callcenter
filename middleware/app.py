@@ -7,6 +7,7 @@ import os
 import urllib.request
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 from bridge_core import Bridge, CallStore, ZammadClient, parse_cdr
 
@@ -82,19 +83,129 @@ def daily(date: str):
     return bridge.store.daily_stats(date)
 
 
+TEST_PAGE_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模拟来电测试 - 自行车客服系统</title>
+<style>
+  body { font-family: sans-serif; margin: 24px auto; max-width: 520px; padding: 0 16px; color: #222; }
+  h1 { font-size: 20px; }
+  label { display: block; margin: 14px 0 6px; font-size: 14px; }
+  input, select { width: 100%; padding: 9px; font-size: 15px; box-sizing: border-box; }
+  button { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px;
+           background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+  button:disabled { background: #999; }
+  #result { margin-top: 18px; padding: 12px; border-radius: 6px; display: none; font-size: 14px; }
+  .ok { background: #e6f4ea; border: 1px solid #34a853; }
+  .err { background: #fdecea; border: 1px solid #d93025; }
+  .hint { color: #666; font-size: 13px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<h1>模拟来电测试</h1>
+<p class="hint">还没有接电话线路时，用这个页面模拟一通客户来电：系统会像真来电一样
+弹出来电提示，通话结束后自动生成一张带录音附件的工单。</p>
+
+<label>客户手机号码</label>
+<input id="caller" value="13800000000">
+
+<label>问题类型（对应电话语音菜单按键）</label>
+<select id="ivr">
+  <option value="1">1 - 故障报修</option>
+  <option value="2">2 - 投诉建议</option>
+  <option value="3">3 - 业务咨询</option>
+  <option value="4">4 - 其他</option>
+</select>
+
+<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
+<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
+
+<button id="go">发起模拟来电</button>
+<div id="result"></div>
+
+<p class="hint">操作顺序：先打开并登录客服系统（端口 8899 的页面）并保持页面开着，
+再回到本页点按钮，然后切回客服系统页面看弹屏和新工单。</p>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
+  if (saved) document.getElementById("secret").value = saved;
+  document.getElementById("go").addEventListener("click", async () => {
+    const btn = document.getElementById("go");
+    const box = document.getElementById("result");
+    const secret = document.getElementById("secret").value.trim();
+    localStorage.setItem("bridge_secret", secret);
+    btn.disabled = true; btn.textContent = "正在模拟来电...";
+    box.style.display = "none";
+    try {
+      const resp = await fetch("/simulate/call", {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "X-Bridge-Secret": secret},
+        body: JSON.stringify({
+          caller_id_number: document.getElementById("caller").value.trim(),
+          ivr_choice: document.getElementById("ivr").value
+        })
+      });
+      const data = await resp.json();
+      box.style.display = "block";
+      if (resp.ok && data.ticket_id) {
+        const link = "http://" + location.hostname + ":8899/#ticket/zoom/" + data.ticket_id;
+        box.className = "ok";
+        box.innerHTML = "模拟来电完成，工单已生成（编号 " + data.ticket_id +
+          "）。<br><a href=\"" + link + "\" target=\"_blank\">点这里打开这张工单</a>" +
+          "<br>录音已作为附件绑在工单上：" + (data.recording_attached ? "是" : "否");
+      } else {
+        box.className = "err";
+        box.textContent = "没有生成工单：" + JSON.stringify(data) +
+          "（常见原因：密钥不对，或客服系统令牌还没配置好）";
+      }
+    } catch (e) {
+      box.style.display = "block"; box.className = "err";
+      box.textContent = "请求失败：" + e;
+    }
+    btn.disabled = false; btn.textContent = "发起模拟来电";
+  });
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/test", response_class=HTMLResponse)
+def test_page():
+    """One-click simulated-call page for trials without a phone line (IPPBX)."""
+    return TEST_PAGE_HTML
+
+
 @app.post("/simulate/call")
-async def simulate(x_bridge_secret: str | None = Header(default=None)):
+async def simulate(request: Request, x_bridge_secret: str | None = Header(default=None)):
     """Trial helper: one fake answered call, end to end, no real phone line.
 
     Creates a 1-second silent WAV in the recordings dir, pushes newCall +
     answer events, then posts a CDR so a Zammad ticket with the recording
     attached should appear. Safe to run repeatedly (unique call id each run).
+
+    Optional JSON body: {"caller_id_number": "138...", "ivr_choice": "1"}
+    (ivr_choice mirrors the IVR keys: 1 repair / 2 complaint / 3 consult /
+    4 other, and decides which Zammad group the ticket lands in.)
     """
     check_secret(x_bridge_secret)
     import struct
     import time
     import uuid as uuidlib
     import wave
+
+    overrides: dict = {}
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            overrides = body
+    except Exception:
+        pass
+    caller = str(overrides.get("caller_id_number") or "13800000000")
+    ivr_choice = str(overrides.get("ivr_choice") or "1")
 
     call_id = str(uuidlib.uuid4())
     filename = f"{call_id}.wav"
@@ -105,9 +216,9 @@ async def simulate(x_bridge_secret: str | None = Header(default=None)):
         w.setsampwidth(2)
         w.setframerate(8000)
         w.writeframes(b"".join(struct.pack("<h", 0) for _ in range(8000)))
-    base = {"uuid": call_id, "caller_id_number": "13800000000",
+    base = {"uuid": call_id, "caller_id_number": caller,
             "destination_number": "4008000000", "direction": "inbound",
-            "ivr_choice": "1", "start_epoch": int(time.time())}
+            "ivr_choice": ivr_choice, "start_epoch": int(time.time())}
     bridge.handle_event("newCall", base)
     bridge.handle_event("answer", base)
     return bridge.handle_cdr({**base, "billsec": "65", "duration": "75",
