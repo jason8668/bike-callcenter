@@ -21,6 +21,14 @@ PAIRS = {
   # Shipped zh-cn pack mistranslates this one into Traditional characters
   # (輸入名字或電話號碼 快搜用戶.機構名稱); override with Simplified.
   'Enter Person or Organization/Company' => '输入名字或电话号码，快搜用户/机构名称',
+  # Data-privacy delete dialog: the shipped pack leaves these in English,
+  # and its translation of the confirm sentence is actively misleading
+  # (it says to type "删除", but Zammad's check only accepts DELETE).
+  # This override keeps the instruction Chinese AND names the word the
+  # check actually wants.
+  'There is no rollback of this deletion possible. If you are sure that you wish to proceed, please type "DELETE" into the input.' => '删除操作无法撤销。如果确认要继续，请在输入框中输入 DELETE。',
+  'matches found' => '条匹配',
+  'invalid' => '无效',
 }.freeze
 
 # New Translation rows require created_by/updated_by (NOT NULL columns);
