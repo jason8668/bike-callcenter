@@ -197,7 +197,7 @@ def summarize_history(tickets: list) -> str:
     parts = [f"该客户历史来电 {usable} 次"]
     if faults:
         ranked = sorted(faults.items(), key=lambda kv: -kv[1])
-        parts.append("故障关键词：" + "、".join(f"{k}×{v}" for k, v in ranked))
+        parts.append("常见问题：" + "、".join(f"{k}×{v}" for k, v in ranked))
     if types:
         ranked = sorted(types.items(), key=lambda kv: -kv[1])
         parts.append("问题类型：" + "、".join(f"{k}×{v}" for k, v in ranked))
