@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -73,6 +74,21 @@ def _to_int(v, default=0):
         return int(float(v))
     except (TypeError, ValueError):
         return default
+
+
+def fmt_duration(sec: int) -> str:
+    """Legacy-style duration: 91 -> '1分31秒', 42 -> '0分42秒'."""
+    sec = max(int(sec or 0), 0)
+    return f"{sec // 60}分{sec % 60:02d}秒"
+
+
+def fmt_cst(epoch: int) -> str:
+    """Unix epoch -> 'YYYY-MM-DD HH:MM:SS' in Asia/Shanghai (the
+    client's timezone; the bridge itself runs on UTC). Empty if unset."""
+    if not epoch:
+        return ""
+    return datetime.fromtimestamp(
+        int(epoch), tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def parse_cdr(payload: dict) -> CallRecord:
@@ -405,6 +421,21 @@ class ZammadClient:
         )
         if in_progress:
             article_body += "\n通话进行中，坐席正在记录；录音将在通话结束后附上。"
+        if rec.ticket_type == "语音留言":
+            # Legacy voicemail list columns, as article lines: caller,
+            # start/end, language, status, duration. The ticket's own
+            # created_at is the 登记时间; the queue is the ticket group.
+            vm_lines = [f"留言者号码: {rec.caller}", "留言语种: zh",
+                        "留言状态: 留言完成"]
+            if rec.duration_sec:
+                vm_lines.append(f"留言时长: {fmt_duration(rec.duration_sec)}")
+            start = fmt_cst(rec.start_epoch)
+            if start:
+                vm_lines.append(f"开始时间: {start}")
+                if rec.duration_sec:
+                    vm_lines.append(
+                        f"结束时间: {fmt_cst(rec.start_epoch + rec.duration_sec)}")
+            article_body += "\n" + "\n".join(vm_lines)
         if history_note:
             article_body += f"\n历史提示: {history_note}"
         article: dict = {
@@ -426,8 +457,18 @@ class ZammadClient:
             "caller_number": rec.caller,
             "call_id": rec.call_id,
             "recording_url": rec.recording_url,
+            # Legacy parity: every ticket carries the call's channel
+            # (热线电话 for calls, 语音留言 for voicemails), any IVR keys
+            # pressed (empty for plain calls), and the duration once known
+            # (answer-time tickets get it at hangup via update_ticket).
+            "service_channel": ("语音留言" if rec.ticket_type == "语音留言"
+                                else "热线电话"),
+            "ivr_keys": (rec.ivr_choice if rec.ivr_choice
+                         and rec.ivr_choice != "voicemail" else ""),
             "article": article,
         }
+        if rec.duration_sec:
+            payload["call_duration"] = fmt_duration(rec.duration_sec)
         if rec.ticket_type:
             # Also stamp the 工单类型 attribute (agents can still change it);
             # voicemail tickets rely on it for the 语音留言 overview filter.
@@ -439,13 +480,23 @@ class ZammadClient:
         self.last_ticket_error = f"HTTP {status}: {str(data)[:300]}"
         return None
 
+    def update_ticket(self, ticket_id: int, fields: dict) -> bool:
+        """Set custom fields on an existing ticket (e.g. the duration,
+        only known at hangup). Best-effort: False on any error."""
+        if not fields:
+            return False
+        status, _ = self._call("PUT", f"/api/v1/tickets/{ticket_id}", fields)
+        return status in (200, 201)
+
     def add_recording_to_ticket(self, ticket_id: int, rec: CallRecord,
                                 recording_bytes: Optional[bytes],
                                 recording_filename: str = "") -> bool:
+        body = (f"CallID: {rec.call_id} 的通话录音见附件。" if recording_bytes
+                else f"CallID: {rec.call_id}\n录音地址: {rec.recording_url}")
+        if rec.duration_sec:
+            body += f"\n通话时长: {fmt_duration(rec.duration_sec)}"
         article: dict = {
-            "ticket_id": ticket_id, "subject": "通话录音",
-            "body": f"CallID: {rec.call_id} 的通话录音见附件。" if recording_bytes
-                    else f"CallID: {rec.call_id}\n录音地址: {rec.recording_url}",
+            "ticket_id": ticket_id, "subject": "通话录音", "body": body,
             "type": "note", "internal": True,
         }
         if recording_bytes:
@@ -586,6 +637,15 @@ class Bridge:
             has_audio = recording is not None or bool(rec.recording_url)
             if attached and has_audio:
                 self.store.mark_recording_attached(rec.call_id)
+            # The answer-time ticket had no duration yet; fill it now
+            # (plus the recording URL if the CDR carried one).
+            fields = {}
+            if rec.duration_sec:
+                fields["call_duration"] = fmt_duration(rec.duration_sec)
+            if rec.recording_url:
+                fields["recording_url"] = rec.recording_url
+            if fields:
+                self.zammad.update_ticket(existing, fields)
             self.store.record(rec, existing)
             return {"ok": True, "call_id": rec.call_id, "ticket_id": existing,
                     "recording_attached": attached,

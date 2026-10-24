@@ -5,6 +5,9 @@ Creates (idempotently — existing objects are skipped):
   1. Ticket groups: 客服组 only (one group; dispatch is by owner, not group)
   2. Ticket custom attributes (ObjectManager):
        caller_number  来电手机号 (text, searchable; filled by the bridge)
+       call_duration  通话时长, legacy style "1分31秒" (filled at hangup)
+       service_channel 服务途径 (热线电话 / 语音留言, filled by the bridge)
+       ivr_keys       按键信息 (empty for plain calls, filled by the bridge)
        call_id        通话唯一ID (text, unique-ish, searchable)
        recording_url  录音访问地址 (text)
        bike_no        单车编号 (text, searchable)
@@ -42,6 +45,10 @@ GROUPS = ["客服组"]
 
 ATTRIBUTES = [
     ("caller_number", "手机号", "input", {"type": "text", "maxlength": 32}),
+    ("call_duration", "通话时长", "input", {"type": "text", "maxlength": 32}),
+    ("service_channel", "服务途径", "select",
+     {"options": {"热线电话": "热线电话", "语音留言": "语音留言"}}),
+    ("ivr_keys", "按键信息", "input", {"type": "text", "maxlength": 32}),
     ("call_id", "通话ID", "input", {"type": "text", "maxlength": 64}),
     ("recording_url", "录音地址", "input", {"type": "text", "maxlength": 255}),
     ("bike_no", "单车编号", "input", {"type": "text", "maxlength": 64}),

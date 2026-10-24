@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from bridge_core import (Bridge, CallRecord, CallStore, ZammadClient,  # noqa: E402
-                         parse_cdr, summarize_history)
+                         fmt_cst, fmt_duration, parse_cdr, summarize_history)
 
 
 class FakeTransport:
@@ -36,6 +36,8 @@ class FakeTransport:
                 "created_at": "2026-10-20T09:00:00Z"}).encode()
         if url.endswith("/api/v1/ticket_articles") and method == "POST":
             return 201, b"{}"
+        if "/api/v1/tickets/" in url and method == "PUT":
+            return 200, b"{}"
         if url.endswith("/api/v1/tickets"):
             self.ticket_seq += 1
             return 201, json.dumps({"id": self.ticket_seq}).encode()
@@ -77,6 +79,13 @@ class TestBridge(unittest.TestCase):
                              store=CallStore(os.path.join(self.tmp, "b.db")),
                              recording_reader=lambda rec: b"RIFF-fake-wav" if rec.recording_path else None)
 
+    def test_fmt_duration_and_cst(self):
+        self.assertEqual(fmt_duration(91), "1分31秒")
+        self.assertEqual(fmt_duration(42), "0分42秒")
+        self.assertEqual(fmt_duration(0), "0分00秒")
+        self.assertEqual(fmt_cst(0), "")
+        self.assertTrue(fmt_cst(1792800000).startswith("2026-"))
+
     def test_recent_tickets_newest_first_and_only_ticketed(self):
         self.bridge.handle_cdr(CDR)  # ticketed, caller 13800000000
         self.bridge.store.record(CallRecord(call_id="no-ticket", caller="13700000000",
@@ -98,6 +107,9 @@ class TestBridge(unittest.TestCase):
         self.assertEqual(payload["call_id"], "abc-123")
         self.assertEqual(payload["caller_number"], "13800000000")
         self.assertEqual(payload["group"], "报修组")
+        self.assertEqual(payload["service_channel"], "热线电话")
+        self.assertEqual(payload["ivr_keys"], "1")
+        self.assertEqual(payload["call_duration"], "1分05秒")
         self.assertIn("attachments", payload["article"])
 
     def test_duplicate_cdr_is_idempotent(self):
@@ -168,6 +180,11 @@ class TestBridge(unittest.TestCase):
                          if c[1].endswith("/api/v1/ticket_articles")]
         self.assertEqual(len(article_posts), 1)
         self.assertIn("attachments", json.loads(article_posts[0][3]))
+        self.assertIn("1分05秒", json.loads(article_posts[0][3])["body"])
+        puts = [c for c in self.transport.calls
+                if "/api/v1/tickets/" in c[1] and c[0] == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(json.loads(puts[0][3])["call_duration"], "1分05秒")
         again = self.bridge.handle_cdr({**CDR, "uuid": "live-2"})
         self.assertEqual(again["note"], "already bound")
         article_posts = [c for c in self.transport.calls
@@ -227,7 +244,12 @@ class TestVoicemail(unittest.TestCase):
         payload = json.loads(ticket_posts[0][3])
         self.assertEqual(payload["group"], "客服组")
         self.assertEqual(payload["ticket_type"], "语音留言")
+        self.assertEqual(payload["service_channel"], "语音留言")
+        self.assertEqual(payload["call_duration"], "0分08秒")
         self.assertIn("attachments", payload["article"])
+        self.assertIn("留言状态: 留言完成", payload["article"]["body"])
+        self.assertIn("留言语种: zh", payload["article"]["body"])
+        self.assertIn("留言时长: 0分08秒", payload["article"]["body"])
 
     def test_voicemail_is_idempotent(self):
         first = self.bridge.handle_voicemail(VM)
