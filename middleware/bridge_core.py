@@ -143,6 +143,16 @@ class CallStore:
             row = c.execute("SELECT ticket_id FROM calls WHERE call_id=?", (call_id,)).fetchone()
         return row[0] if row and row[0] else None
 
+    def tickets_for_caller(self, phone: str, limit: int = 10) -> list[int]:
+        """Ticket ids previously bound to this caller number, newest first."""
+        if not phone:
+            return []
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT ticket_id FROM calls WHERE caller=? AND ticket_id IS NOT NULL "
+                "ORDER BY rowid DESC LIMIT ?", (phone, limit)).fetchall()
+        return [r[0] for r in rows]
+
     def record(self, rec: CallRecord, ticket_id: Optional[int]) -> None:
         with self._conn() as c:
             c.execute(
@@ -272,41 +282,52 @@ class ZammadClient:
         )[0], {}
 
     # -- customers ------------------------------------------------------------
-    def find_or_create_customer(self, phone: str) -> Optional[int]:
-        if not phone:
-            return None
-        status, data = self._call("GET", f"/api/v1/users/search?query=phone:{phone}")
-        if status == 200 and isinstance(data, list) and data:
-            return data[0].get("id")
-        status, data = self._call("POST", "/api/v1/users", {
-            "firstname": phone, "lastname": "(电话客户)", "phone": phone,
-            "roles": ["Customer"],
-        })
-        if status in (200, 201) and isinstance(data, dict):
-            return data.get("id")
-        return None
+    # Phone tickets do NOT get a user account per caller (operator ruling):
+    # every phone ticket is filed under one shared "phone customer", and
+    # the real caller number lives on the ticket (title + article). This
+    # also avoids the duplicate-account trap: Zammad's user search does
+    # not match on phone, so a per-caller lookup created a new user on
+    # every call instead of finding the old one.
+    PHONE_CUSTOMER_LOGIN = "phone-customer"
 
-    def customer_history(self, customer_id: Optional[int], limit: int = 10) -> list:
-        """Recent tickets of this customer, for the history/keyword hint.
+    def phone_customer_id(self) -> Optional[int]:
+        """Id of the shared phone customer, resolved once and cached.
 
-        Best-effort: any API error yields []. Zammad's ticket search may
-        return full ticket objects or just ids depending on version, so
-        ids are resolved individually (capped)."""
-        if not customer_id:
-            return []
+        Resolution order: search by login, scan the user list, create.
+        Best-effort: any failure yields None (ticket creation still
+        proceeds; Zammad then files the ticket under the API user)."""
+        if getattr(self, "_phone_customer_id", None):
+            return self._phone_customer_id
+        found = None
         status, data = self._call(
-            "GET", f"/api/v1/tickets/search?query=customer_id:{customer_id}&limit={limit}")
-        if status != 200 or not isinstance(data, list):
-            return []
-        tickets = []
-        for item in data:
-            if isinstance(item, dict):
-                tickets.append(item)
-            elif isinstance(item, int) and len(tickets) < 5:
-                s2, t2 = self._call("GET", f"/api/v1/tickets/{item}")
-                if s2 == 200 and isinstance(t2, dict):
-                    tickets.append(t2)
-        return tickets
+            "GET",
+            "/api/v1/users/search?query=login:" + self.PHONE_CUSTOMER_LOGIN)
+        if status == 200 and isinstance(data, list) and data:
+            found = data[0].get("id")
+        if not found:
+            status, data = self._call("GET", "/api/v1/users?limit=100")
+            if status == 200 and isinstance(data, list):
+                for user in data:
+                    if isinstance(user, dict) and user.get("login") == self.PHONE_CUSTOMER_LOGIN:
+                        found = user.get("id")
+                        break
+        if not found:
+            status, data = self._call("POST", "/api/v1/users", {
+                "login": self.PHONE_CUSTOMER_LOGIN,
+                "firstname": "电话客户", "roles": ["Customer"],
+            })
+            if status in (200, 201) and isinstance(data, dict):
+                found = data.get("id")
+        if found:
+            self._phone_customer_id = found
+        return found
+
+    def get_ticket(self, ticket_id: int) -> Optional[dict]:
+        """One ticket as Zammad returns it (custom attributes included)."""
+        status, data = self._call("GET", f"/api/v1/tickets/{ticket_id}")
+        if status == 200 and isinstance(data, dict):
+            return data
+        return None
 
     # -- tickets ---------------------------------------------------------------
     def create_ticket_with_recording(self, rec: CallRecord, customer_id: Optional[int],
@@ -373,8 +394,8 @@ class ZammadClient:
     def search_tickets(self, query: str, page: int = 1, per_page: int = 100) -> list:
         """One page of tickets matching a Zammad search query, as dicts.
 
-        Best-effort: any API error yields []. Mirrors customer_history's
-        tolerance for id-only search results."""
+        Best-effort: any API error yields []. Tolerates id-only search
+        results by resolving them individually."""
         q = urllib.parse.quote(query, safe="")
         status, data = self._call(
             "GET", f"/api/v1/tickets/search?query={q}&page={page}&per_page={per_page}")
@@ -430,12 +451,16 @@ class Bridge:
         stamped on top. Returns (ticket_id, recording_attached, hint)."""
         recording = self.recording_reader(rec)
         filename = os.path.basename(rec.recording_path) if rec.recording_path else ""
-        customer_id = self.zammad.find_or_create_customer(rec.caller)
-        # Returning caller: summarize past tickets into a keyword hint so
-        # the agent sees this customer's usual problems on the new ticket.
+        customer_id = self.zammad.phone_customer_id()
+        # Returning caller: past tickets are found by caller NUMBER in
+        # the bridge's own call log (not by customer account, since all
+        # phone tickets share one customer), so the agent still sees this
+        # number's usual problems on the new ticket.
         history_note = ""
         try:
-            history_note = summarize_history(self.zammad.customer_history(customer_id))
+            past = [self.zammad.get_ticket(tid)
+                    for tid in self.store.tickets_for_caller(rec.caller)]
+            history_note = summarize_history([t for t in past if t])
         except Exception:
             history_note = ""
         ticket_id = self.zammad.create_ticket_with_recording(

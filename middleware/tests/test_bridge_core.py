@@ -17,8 +17,18 @@ class FakeTransport:
 
     def __call__(self, method, url, headers, body):
         self.calls.append((method, url, headers, body))
-        if url.endswith("/api/v1/users/search?query=phone:13800000000"):
-            return 200, json.dumps([{"id": 7}]).encode()
+        if url.endswith("/api/v1/users/search?query=login:phone-customer"):
+            return 200, b"[]"
+        if url.endswith("/api/v1/users?limit=100"):
+            return 200, b"[]"
+        if url.endswith("/api/v1/users") and method == "POST":
+            return 201, json.dumps({"id": 9}).encode()
+        if "/api/v1/tickets/" in url and method == "GET":
+            # Ticket 101 (the first created) already has an agent-filled
+            # fault type, like a real returning caller's old ticket.
+            return 200, json.dumps({
+                "id": 101, "fault_type": "锁故障", "ticket_type": "故障报修",
+                "created_at": "2026-10-20T09:00:00Z"}).encode()
         if url.endswith("/api/v1/tickets"):
             self.ticket_seq += 1
             return 201, json.dumps({"id": self.ticket_seq}).encode()
@@ -78,6 +88,20 @@ class TestBridge(unittest.TestCase):
         ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
         self.assertEqual(len(ticket_posts), 1)
 
+    def test_different_callers_share_one_phone_customer(self):
+        """No per-caller user accounts: two numbers file under the same
+        shared phone customer, created only once."""
+        self.bridge.handle_cdr(CDR)
+        self.bridge.handle_cdr({**CDR, "uuid": "other-1",
+                                "caller_id_number": "13900000000"})
+        ticket_posts = [c for c in self.transport.calls if c[1].endswith("/api/v1/tickets")]
+        self.assertEqual(len(ticket_posts), 2)
+        for c in ticket_posts:
+            self.assertEqual(json.loads(c[3])["customer_id"], 9)
+        user_posts = [c for c in self.transport.calls
+                      if c[1].endswith("/api/v1/users") and c[0] == "POST"]
+        self.assertEqual(len(user_posts), 1)
+
     def test_missed_call_creates_no_ticket(self):
         out = self.bridge.handle_cdr({**CDR, "uuid": "miss-1", "billsec": "0", "duration": "20"})
         self.assertTrue(out["ok"])
@@ -89,25 +113,6 @@ class TestBridge(unittest.TestCase):
         cti = [c for c in self.transport.calls if "/api/v1/cti/" in c[1]]
         self.assertEqual(len(cti), 1)
         self.assertEqual(json.loads(cti[0][3])["callId"], "abc-123")
-
-
-class HistoryTransport(FakeTransport):
-    """Customer 7 has two past tickets; everyone else has none."""
-
-    HISTORY = [
-        {"id": 11, "fault_type": "锁故障", "ticket_type": "故障报修",
-         "created_at": "2026-10-18T09:00:00Z"},
-        {"id": 12, "fault_type": "锁故障", "ticket_type": "故障报修",
-         "created_at": "2026-10-20T09:00:00Z"},
-        {"id": 13, "fault_type": "掉链", "ticket_type": "故障报修",
-         "created_at": "2026-10-19T09:00:00Z"},
-    ]
-
-    def __call__(self, method, url, headers, body):
-        if "/api/v1/tickets/search?" in url:
-            self.calls.append((method, url, headers, body))
-            return 200, json.dumps(self.HISTORY).encode()
-        return super().__call__(method, url, headers, body)
 
 
 VM = {
@@ -150,7 +155,15 @@ class TestVoicemail(unittest.TestCase):
 
 class TestHistoryHint(unittest.TestCase):
     def test_summarize_history(self):
-        note = summarize_history(HistoryTransport.HISTORY)
+        history = [
+            {"id": 11, "fault_type": "锁故障", "ticket_type": "故障报修",
+             "created_at": "2026-10-18T09:00:00Z"},
+            {"id": 12, "fault_type": "锁故障", "ticket_type": "故障报修",
+             "created_at": "2026-10-20T09:00:00Z"},
+            {"id": 13, "fault_type": "掉链", "ticket_type": "故障报修",
+             "created_at": "2026-10-19T09:00:00Z"},
+        ]
+        note = summarize_history(history)
         self.assertIn("历史来电 3 次", note)
         self.assertIn("锁故障×2", note)
         self.assertIn("掉链×1", note)
@@ -158,19 +171,23 @@ class TestHistoryHint(unittest.TestCase):
         self.assertEqual(summarize_history([]), "")
 
     def test_returning_caller_ticket_carries_hint(self):
+        """History is found by caller NUMBER in the bridge's own call
+        log (not by customer account): a second call from the same
+        number carries the first ticket's fault keyword."""
         tmp = tempfile.mkdtemp()
-        transport = HistoryTransport()
+        transport = FakeTransport()
         zammad = ZammadClient("http://zammad.local", "tok", transport=transport,
-                              cti_token="cti-tok")
+                              cti_token=None)
         bridge = Bridge(zammad=zammad, store=CallStore(os.path.join(tmp, "b.db")),
                         recording_reader=lambda rec: b"RIFF-fake-wav")
+        bridge.handle_cdr(CDR)  # first call -> ticket 101
         out = bridge.handle_cdr({**CDR, "uuid": "repeat-1"})
         self.assertTrue(out["ok"])
-        self.assertIn("锁故障×2", out["history_hint"])
+        self.assertIn("锁故障×1", out["history_hint"])
         ticket_posts = [c for c in transport.calls if c[1].endswith("/api/v1/tickets")]
-        payload = json.loads(ticket_posts[0][3])
+        payload = json.loads(ticket_posts[1][3])
         self.assertIn("历史提示", payload["article"]["body"])
-        self.assertIn("锁故障×2", payload["article"]["body"])
+        self.assertIn("锁故障×1", payload["article"]["body"])
 
 
 if __name__ == "__main__":
