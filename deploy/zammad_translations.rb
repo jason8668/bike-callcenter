@@ -48,4 +48,13 @@ PAIRS.each do |source, target|
     puts "translation FAILED: #{source} (#{e.class}: #{e.message.to_s[0, 100]})"
   end
 end
+# New rows can sit behind the Rails cache (the dashboard kept showing the
+# old English strings after the first run); flush it so the overrides
+# take effect on next page load. The cache rebuilds on demand.
+begin
+  Rails.cache.clear
+  puts 'cache cleared'
+rescue StandardError => e
+  puts "cache clear FAILED: #{e.class}"
+end
 puts 'TRANSLATIONS_DONE'
