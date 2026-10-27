@@ -4,15 +4,19 @@ Run: uvicorn app:app --host 0.0.0.0 --port 8090
 Env: see .env.example. All secrets live in .env only, never in Git.
 
 This is a RECORD system, not a ticket system: no Zammad, no workflow.
-Pages: /records (record list), /records/<id> (detail + notes + audio),
-/board (agent pop-up board), /test (simulated calls without a line).
+Pages: / (login + desk: ONE system for agents), /login, /setup
+(admin seat passwords), /test (simulated calls without a line).
+The desk, after login, holds call pop-ups, the record list, record
+detail + notes + audio, the busy toggle, and per-seat stats/history.
+Old /board and /records URLs redirect to /desk.
 """
 import html
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from bridge_core import Bridge, CallStore, summarize_call_history
 from export_xlsx import CALL_COLUMNS, XLSX_MIME, build_xlsx, call_row
@@ -47,6 +51,47 @@ bridge = Bridge(
     store=CallStore(DB_PATH),
     rotation_agents=_ROTATION_AGENTS,
 )
+
+# ------------------------------------------------------------------ login
+# One login, one system: a seat account (8001/8002/8003) logs in at /
+# and lands on the desk. Login = Available by default (calls are sent
+# to the seat); only a self-set On Break stops distribution. Sessions
+# are random tokens in an HttpOnly cookie; the desk page touches its
+# session on every poll, so closing the browser without logout lets
+# the seat go stale and the cleanup thread below logs it out of the
+# queue (10 minutes of silence).
+SESSION_COOKIE = "bike_session"
+
+
+def get_seat(request: Request) -> str | None:
+    """Seat for the request's session cookie, or None. Validating
+    touches the heartbeat, so an open desk page keeps the seat live."""
+    return bridge.store.get_session_seat(request.cookies.get(SESSION_COOKIE))
+
+
+def require_seat(request: Request) -> str:
+    seat = get_seat(request)
+    if not seat:
+        raise HTTPException(status_code=401, detail="请先登录")
+    return seat
+
+
+def _cleanup_loop() -> None:
+    """Background: log out seats whose browsers went silent."""
+    import time as _time
+
+    while True:
+        try:
+            bridge.logout_stale_seats()
+        except Exception:
+            pass
+        _time.sleep(60)
+
+
+try:
+    threading.Thread(target=_cleanup_loop, daemon=True).start()
+except Exception:
+    pass
 
 app = FastAPI(title="bike-callcenter bridge", version="1.0.0")
 
@@ -126,20 +171,38 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>模拟来电测试 - 自行车客服系统</title>
 <style>
-  body { font-family: sans-serif; margin: 24px auto; max-width: 520px; padding: 0 16px; color: #222; }
-  h1 { font-size: 20px; }
-  label { display: block; margin: 14px 0 6px; font-size: 14px; }
-  input, select { width: 100%; padding: 9px; font-size: 15px; box-sizing: border-box; }
-  button { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px;
-           background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
-  button:disabled { background: #999; }
-  #result, #vm_result { margin-top: 18px; padding: 12px; border-radius: 6px; display: none; font-size: 14px; }
-  .ok { background: #e6f4ea; border: 1px solid #34a853; }
-  .err { background: #fdecea; border: 1px solid #d93025; }
-  .hint { color: #666; font-size: 13px; line-height: 1.6; }
+  body { font-family: -apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         margin: 0; padding: 24px 16px; color: #1c1c1e; background: #f5f5f7; -webkit-font-smoothing: antialiased; }
+  body::before { content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background:
+      radial-gradient(600px 400px at 12% -5%, rgba(0,122,255,.12), transparent 60%),
+      radial-gradient(520px 420px at 95% 5%, rgba(88,86,214,.10), transparent 60%),
+      radial-gradient(720px 520px at 50% 115%, rgba(52,199,123,.10), transparent 60%); }
+  .card { max-width: 560px; margin: 0 auto; position: relative; z-index: 1;
+    background: rgba(255,255,255,.72); backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border-radius: 24px; box-shadow: 0 8px 32px rgba(0,0,0,.08);
+    border: 1px solid rgba(255,255,255,.65); padding: 24px 26px; }
+  h1 { font-size: 22px; letter-spacing: -.4px; }
+  label { display: block; margin: 14px 0 6px; font-size: 14px; color: #8a8a8e; }
+  input, select { width: 100%; padding: 10px 13px; font-size: 15px; box-sizing: border-box;
+    border: 1px solid rgba(0,0,0,.08); border-radius: 12px; background: rgba(255,255,255,.85); }
+  input:focus, select:focus { outline: none; border-color: #007aff; box-shadow: 0 0 0 4px rgba(0,122,255,.15); }
+  button { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px; font-weight: 600;
+           background: #007aff; color: #fff; border: 0; border-radius: 999px; cursor: pointer;
+           box-shadow: 0 2px 10px rgba(0,122,255,.30); transition: transform .15s; }
+  button:active { transform: scale(.97); }
+  button:disabled { background: #999; box-shadow: none; }
+  #result, #vm_result { margin-top: 18px; padding: 12px 14px; border-radius: 14px; display: none; font-size: 14px; }
+  .ok { background: rgba(52,199,123,.14); color: #248a3d; }
+  .err { background: rgba(255,59,48,.12); color: #d70015; }
+  .hint { color: #8a8a8e; font-size: 13px; line-height: 1.6; }
+  hr { border: 0; border-top: 1px solid rgba(0,0,0,.06); margin: 24px 0; }
+  a { color: #007aff; }
 </style>
 </head>
 <body>
+<div class="card">
 <h1>模拟来电测试</h1>
 <p class="hint">还没有接电话线路时，用这个页面模拟一通客户来电：系统会像真来电一样
 弹出来电提示，接通时记录就自动弹出来（带电话号码），坐席可以在通话过程中
@@ -155,8 +218,8 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <button id="go">发起模拟来电</button>
 <div id="result"></div>
 
-<p class="hint">操作顺序：先打开坐席来电看板（/board）并点“开始值班”，
-再回到本页点按钮，然后切回看板页面看弹屏和新记录。</p>
+<p class="hint">操作顺序：先用坐席账号登录工作台（/），登录后即自动在线接单，
+再回到本页点按钮，然后切回工作台看弹屏和新记录。</p>
 
 <hr>
 <h1>模拟语音留言</h1>
@@ -202,7 +265,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       const data = await resp.json();
       box.style.display = "block";
       if (resp.ok && data.record_id) {
-        const link = "/records/" + data.record_id;
+        const link = "/desk?record=" + data.record_id;
         box.className = "ok";
         box.innerHTML = "模拟来电完成，记录已生成（编号 " + data.record_id +
           "）。<br><a href='" + link + "' target='_blank'>点这里打开这条记录</a>" +
@@ -236,7 +299,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       const data = await resp.json();
       box.style.display = "block";
       if (resp.ok && data.record_id) {
-        const link = "/records/" + data.record_id;
+        const link = "/desk?record=" + data.record_id;
         box.className = "ok";
         box.innerHTML = "语音留言记录已生成（编号 " + data.record_id +
           "）。<br><a href='" + link + "' target='_blank'>点这里打开这条留言记录</a>";
@@ -278,6 +341,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
   document.getElementById("exp_calls").addEventListener("click",
     () => downloadXlsx("/export/calls.xlsx", "records.xlsx"));
 </script>
+</div>
 </body>
 </html>
 """
@@ -378,554 +442,607 @@ async def simulate_voicemail(request: Request, x_bridge_secret: str | None = Hea
         "start_epoch": int(time.time()), "recording_path": filename})
 
 
-# --- agent board: a record pops open by itself, not a list badge --------
-# Why this page exists: a record list never opens itself - a new record
-# only shows up as a new row, and the agent has to notice it and click
-# through. During a live call that is too slow. So agents keep this board
-# open: it polls the bridge, and the moment a new record is created it
-# navigates THIS tab straight to the record detail (self-navigation is
-# not blocked by popup blockers). After finishing the record, the agent
-# returns to the board bookmark; the next call then pops open the same way.
-BOARD_PAGE_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>坐席来电看板 - 自行车客服系统</title>
-<style>
-  body { font-family: sans-serif; margin: 24px auto; max-width: 560px; padding: 0 16px; color: #222; }
-  h1 { font-size: 20px; }
-  label { display: block; margin: 14px 0 6px; font-size: 14px; }
-  input { width: 100%; padding: 9px; font-size: 15px; box-sizing: border-box; }
-  button { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px;
-           background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
-  button:disabled { background: #999; }
-  .hint { color: #666; font-size: 13px; line-height: 1.6; }
-  #status { margin-top: 16px; padding: 10px; border-radius: 6px; background: #f1f1f1; font-size: 14px; }
-  #alert { display: none; margin-top: 16px; padding: 20px; border-radius: 8px;
-           background: #d93025; color: #fff; font-size: 22px; text-align: center;
-           animation: flash 0.8s infinite alternate; }
-  @keyframes flash { from { opacity: 1; } to { opacity: 0.55; } }
-  #recent { margin-top: 16px; font-size: 14px; line-height: 1.9; }
-  #recent a { color: #0e7a5f; }
-</style>
-</head>
-<body>
-<h1>坐席来电看板</h1>
-<p class="hint">上班时打开这个页面并点“开始值班”，来电时页面会自动跳到新记录，不用盯着列表等。
-记录打开后这个标签页就变成记录页了，处理完请点收藏夹回到看板，下一通电话继续自动弹。</p>
 
-<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
-<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
 
-<button id="go">开始值班</button>
-<div id="status">还没有开始值班。</div>
-<div id="alert"></div>
-<div id="recent"></div>
+# ------------------------------------------------------------------ desk
+# One login, one system: /login -> /desk. The desk holds call pop-ups,
+# the record list, record detail + notes + audio, the busy toggle, and
+# per-seat stats/history. Old /board and /records redirect here.
 
-<h2 style="font-size:16px;margin-top:28px;">我的坐席状态</h2>
-<p class="hint">有事离开时把自己置忙，队列和留言就不再分给你，只分给其他坐席；回来点“置闲”恢复。
-也可以直接在话机上拨 *51 置忙、*52 置闲。</p>
-<label>我是几号坐席</label>
-<select id="seat" style="width:100%;padding:9px;font-size:15px;">
-  <option value="8001">8001</option>
-  <option value="8002">8002</option>
-  <option value="8003">8003</option>
-</select>
-<button id="busyBtn" style="background:#666;">置忙</button>
-<div id="seatStatus" style="margin-top:12px;font-size:14px;line-height:1.9;"></div>
+BASE_CSS = """
+:root{--blue:#007aff;--blue-dk:#0062cc;--bg:#f5f5f7;--text:#1c1c1e;--muted:#8a8a8e;
+--line:rgba(0,0,0,.06);--red:#ff3b30;--red-bg:rgba(255,59,48,.12);--amber:#ff9500;
+--amber-bg:rgba(255,149,0,.14);--green:#34c759;--green-bg:rgba(52,199,123,.14);
+--gray-bg:rgba(120,120,128,.12)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+-webkit-font-smoothing:antialiased}
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+background:
+radial-gradient(600px 400px at 12% -5%, rgba(0,122,255,.12), transparent 60%),
+radial-gradient(520px 420px at 95% 5%, rgba(88,86,214,.10), transparent 60%),
+radial-gradient(720px 520px at 50% 115%, rgba(52,199,123,.10), transparent 60%)}
+.topbar,.wrap,.center{position:relative;z-index:1}
+a{color:var(--blue)}
+.topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:14px;
+padding:12px 20px;flex-wrap:wrap;
+background:rgba(255,255,255,.72);backdrop-filter:blur(20px) saturate(180%);
+-webkit-backdrop-filter:blur(20px) saturate(180%);
+border-bottom:1px solid rgba(0,0,0,.06)}
+.topbar .brand{font-size:19px;font-weight:700;letter-spacing:-.3px}
+.topbar .spacer{flex:1}
+.pill{display:inline-block;padding:4px 13px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap}
+.pill-green{background:var(--green-bg);color:#248a3d}
+.pill-amber{background:var(--amber-bg);color:#a15c00}
+.pill-gray{background:var(--gray-bg);color:#6b7280}
+.pill-red{background:var(--red-bg);color:#d70015}
+.btn{border:0;border-radius:999px;padding:10px 20px;font-size:15px;font-weight:600;cursor:pointer;
+background:var(--blue);color:#fff;box-shadow:0 2px 10px rgba(0,122,255,.30);
+transition:transform .15s,background .15s}
+.btn:hover{background:var(--blue-dk)}
+.btn:active{transform:scale(.97)}
+.btn-ghost{background:rgba(255,255,255,.65);color:var(--text);border:1px solid rgba(0,0,0,.08);
+box-shadow:none;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.btn-ghost:hover{background:rgba(255,255,255,.9)}
+.btn-sm{padding:7px 14px;font-size:13px}
+input,select,textarea{border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:10px 13px;
+font-size:15px;width:100%;background:rgba(255,255,255,.85)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--blue);
+box-shadow:0 0 0 4px rgba(0,122,255,.15)}
+label{font-size:14px;color:var(--muted);display:block;margin:12px 0 4px}
+.wrap{max-width:1180px;margin:0 auto;padding:20px}
+.card{background:rgba(255,255,255,.72);border-radius:24px;
+box-shadow:0 8px 32px rgba(0,0,0,.08);border:1px solid rgba(255,255,255,.65);
+backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%);
+padding:20px 22px}
+.card h2{margin:0 0 12px;font-size:17px;font-weight:700;letter-spacing:-.2px}
+.grid{display:grid;grid-template-columns:1.55fr 1fr;gap:20px;align-items:start}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.center{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.auth-card{width:400px;max-width:100%}
+.auth-card h1{margin:0 0 4px;font-size:24px;font-weight:700;letter-spacing:-.4px}
+.auth-card .sub{color:var(--muted);font-size:14px;margin:0 0 8px;line-height:1.6}
+.msg{border-radius:14px;padding:11px 15px;font-size:14px;margin:12px 0;line-height:1.6}
+.msg-err{background:var(--red-bg);color:#d70015}
+.msg-ok{background:var(--green-bg);color:#248a3d}
+.msg-info{background:rgba(0,122,255,.10);color:#0057b8}
+.foot{font-size:13px;color:var(--muted);text-align:center;margin-top:16px}
+"""
 
-<h2 style="font-size:16px;margin-top:28px;">我的接单统计与历史</h2>
-<p class="hint">这里是你自己接过的电话和分给你的留言：今日接听、累计接听、分派留言数，
-下面是最近 50 条记录（点记录号可打开原记录）。</p>
-<div id="myStats" style="margin-top:12px;font-size:14px;line-height:1.9;"></div>
-<div id="myHistory" style="margin-top:12px;font-size:14px;line-height:1.9;"></div>
+DESK_CSS = """
+.alert{display:none;border-radius:24px;padding:16px 22px;margin-bottom:20px;
+background:rgba(255,59,48,.88);color:#fff;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+box-shadow:0 8px 28px rgba(255,59,48,.35)}
+.alert.show{display:block;animation:flash 1.2s infinite}
+@keyframes flash{0%,100%{box-shadow:0 8px 28px rgba(255,59,48,.35)}50%{box-shadow:0 8px 36px rgba(255,59,48,.55)}}
+.alert b{font-size:22px}
+.alert small{font-size:14px;opacity:.9}
+.search{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+.search input,.search select{width:auto;flex:1;min-width:110px}
+.seg{display:flex;background:var(--gray-bg);border-radius:10px;padding:2px;gap:2px}
+.seg button{border:0;background:transparent;padding:7px 14px;border-radius:8px;font-size:14px;
+cursor:pointer;color:var(--text);box-shadow:none}
+.seg button.on{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.15);font-weight:600}
+.switch-wrap{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500}
+.switch{position:relative;display:inline-block;width:51px;height:31px;flex:none}
+.switch input{display:none}
+.switch .slider{position:absolute;inset:0;background:rgba(120,120,128,.32);border-radius:999px;
+transition:.2s;cursor:pointer}
+.switch .slider:before{content:"";position:absolute;width:27px;height:27px;left:2px;top:2px;
+background:#fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,.25);transition:.2s}
+.switch input:checked + .slider{background:#34c759}
+.switch input:checked + .slider:before{transform:translateX(20px)}
+.row{display:grid;grid-template-columns:140px 64px 1fr 64px 110px;gap:8px;padding:11px 8px;
+border-bottom:1px solid var(--line);cursor:pointer;font-size:14px;align-items:center}
+.row:hover{background:rgba(0,0,0,.02)}
+.row:active{background:rgba(0,0,0,.04)}
+.row .caller{font-weight:600}
+.row .q{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.seats{display:flex;gap:10px;flex-wrap:wrap}
+.seat-chip{border:1px solid rgba(255,255,255,.8);background:rgba(255,255,255,.55);
+border-radius:999px;padding:6px 14px;font-size:14px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+.dot-green{background:#34c759}.dot-amber{background:#ff9500}.dot-gray{background:#8a8a8e}
+.stats{display:flex;gap:28px;margin-bottom:8px}
+.stat b{font-size:28px;display:block;letter-spacing:-.5px}
+.stat span{color:var(--muted);font-size:13px}
+.hist{font-size:14px;padding:8px 0;border-bottom:1px solid var(--line)}
+.hist .t{color:var(--muted);font-size:13px}
+dl{margin:0}
+dt{color:var(--muted);font-size:13px;margin-top:10px}
+dd{margin:2px 0 0;font-size:15px}
+audio{width:100%;margin-top:8px}
+.pager{display:flex;gap:8px;justify-content:space-between;margin-top:14px}
+.empty{color:var(--muted);text-align:center;padding:30px 0}
+.detail-sticky{position:sticky;top:68px}
+@media(max-width:900px){.detail-sticky{position:static}}
+"""
 
+
+def _page(title: str, body: str, extra_css: str = "") -> str:
+    return ("<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>" + title + "</title><style>" + BASE_CSS + extra_css +
+            "</style></head><body>" + body + "</body></html>")
+
+
+def login_page(seats: list, has_agents: bool, error: str = "") -> str:
+    options = "".join(
+        "<option value=\"" + html.escape(s) + "\">" + html.escape(s) + "</option>"
+        for s in seats)
+    err = ("<div class=\"msg msg-err\">" + html.escape(error) + "</div>") if error else ""
+    notice = ""
+    if not has_agents:
+        notice = ("<div class=\"msg msg-info\">还没有设置坐席密码，"
+                  "请管理员先打开 <a href=\"/setup\">坐席密码设置</a> 设置好再登录。</div>")
+    body = ("<div class=\"center\"><div class=\"card auth-card\">"
+            "<h1>🚲 自行车客服工作台</h1>"
+            "<p class=\"sub\">请用坐席账号登录。登录后即自动在线接单，"
+            "只有自己置忙时才不分单。</p>"
+            + err + notice +
+            "<form method=\"post\" action=\"/login\">"
+            "<label>坐席账号</label><select name=\"seat\">" + options + "</select>"
+            "<label>登录密码</label>"
+            "<input type=\"password\" name=\"password\" required autofocus>"
+            "<button class=\"btn\" style=\"width:100%;margin-top:18px\">登录</button>"
+            "</form>"
+            "<p class=\"foot\"><a href=\"/setup\">管理员设置坐席密码</a></p>"
+            "</div></div>")
+    return _page("登录 - 自行车客服工作台", body)
+
+
+def setup_page(seats: list, error: str = "", ok: str = "") -> str:
+    err = ("<div class=\"msg msg-err\">" + html.escape(error) + "</div>") if error else ""
+    good = ("<div class=\"msg msg-ok\">" + html.escape(ok) + "</div>") if ok else ""
+    fields = ""
+    for s in seats:
+        fields += ("<label>坐席 " + html.escape(s) + " 新密码</label>"
+                   "<input type=\"password\" name=\"pw_" + html.escape(s) + "\">"
+                   "<label>坐席 " + html.escape(s) + " 再输一次</label>"
+                   "<input type=\"password\" name=\"pw2_" + html.escape(s) + "\">")
+    body = ("<div class=\"center\"><div class=\"card auth-card\" style=\"width:480px\">"
+            "<h1>坐席密码设置</h1>"
+            "<p class=\"sub\">管理员专用：需要桥接密钥（服务器 middleware/.env 里的 "
+            "BRIDGE_SECRET）。只填要设置或修改的坐席，留空表示不动。</p>"
+            + err + good +
+            "<form method=\"post\" action=\"/setup\">"
+            "<label>桥接密钥</label><input type=\"password\" name=\"secret\" required>"
+            + fields +
+            "<button class=\"btn\" style=\"width:100%;margin-top:18px\">保存</button>"
+            "</form>"
+            "<p class=\"foot\"><a href=\"/login\">返回登录</a></p>"
+            "</div></div>")
+    return _page("坐席密码设置 - 自行车客服工作台", body)
+
+
+SERVICE_TYPES = ["还车异常", "借车异常", "锁桩故障", "车辆损坏",
+                 "掉链", "乱停放", "扣费退款", "其他"]
+
+
+def desk_page_html(seat: str) -> str:
+    body = """
+<div class="topbar">
+  <div class="brand">🚲 自行车客服工作台</div>
+  <div class="spacer"></div>
+  <span>坐席 <b id="seatLabel">__SEAT__</b></span>
+  <span id="statusPill" class="pill pill-gray">未知</span>
+  <label class="switch-wrap"><span>接单</span><span class="switch"><input type="checkbox" id="busySwitch" checked><span class="slider"></span></span></label>
+  <form method="post" action="/logout" style="margin:0">
+    <button class="btn btn-sm btn-ghost">退出</button>
+  </form>
+</div>
+<div class="wrap">
+  <div id="alert" class="alert">
+    <span id="alertText"></span>
+    <button class="btn btn-sm btn-ghost" style="float:right"
+      onclick="document.getElementById('alert').classList.remove('show')">知道了</button>
+  </div>
+  <div class="card" style="margin-bottom:20px">
+    <h2>坐席状态</h2>
+    <div id="seatStrip" class="seats"><span style="color:var(--muted)">加载中…</span></div>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <h2>通话记录</h2>
+      <div class="search">
+        <input id="fCaller" placeholder="搜电话号码">
+        <div class="seg" id="kindSeg">
+          <button type="button" data-kind="" class="on">全部</button>
+          <button type="button" data-kind="电话">电话</button>
+          <button type="button" data-kind="未接">未接</button>
+          <button type="button" data-kind="留言">留言</button>
+        </div>
+        <input type="hidden" id="fKind" value="">
+        <input id="fDate" type="date">
+        <button class="btn btn-sm" onclick="searchList()">搜索</button>
+        <input id="fDays" type="number" value="30" min="1" max="365" title="导出天数">
+        <button class="btn btn-sm btn-ghost" onclick="exportXlsx()">导出 Excel</button>
+      </div>
+      <div id="list"><div class="empty">加载中…</div></div>
+      <div class="pager">
+        <button id="prevBtn" class="btn btn-sm btn-ghost" onclick="changePage(-1)">上一页</button>
+        <button id="nextBtn" class="btn btn-sm btn-ghost" onclick="changePage(1)">下一页</button>
+      </div>
+    </div>
+    <div>
+      <div class="card detail-sticky" id="detail">
+        <h2>记录详情</h2>
+        <div class="empty">在左侧点一条记录查看详情、听录音、补填内容。<br>来电时新记录会自动弹到这里。</div>
+      </div>
+      <div class="card" style="margin-top:20px">
+        <h2>我的统计与历史</h2>
+        <div class="stats">
+          <div class="stat"><b id="statToday">–</b><span>今日接听</span></div>
+          <div class="stat"><b id="statTotal">–</b><span>累计接听</span></div>
+          <div class="stat"><b id="statVm">–</b><span>分派留言</span></div>
+        </div>
+        <div id="history"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+  </div>
+</div>
 <script>
-let baseline = 0, watching = false, timer = null, audioCtx = null;
-const params = new URLSearchParams(location.search);
-const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
-if (saved) document.getElementById("secret").value = saved;
-
-function recordUrl(id) {
-  return "/records/" + id;
+var baseline = 0, currentId = null, offset = 0;
+var SERVICE_TYPES = ["还车异常", "借车异常", "锁桩故障", "车辆损坏", "掉链", "乱停放", "扣费退款", "其他"];
+function $(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 function beep() {
   try {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-    o.connect(g); g.connect(audioCtx.destination);
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
     o.frequency.value = 880; g.gain.value = 0.15;
-    o.start(); setTimeout(() => o.stop(), 600);
+    o.start(); setTimeout(function() { o.stop(); ctx.close(); }, 600);
   } catch (e) {}
 }
-async function poll() {
-  const secret = document.getElementById("secret").value.trim();
-  let resp;
-  try {
-    resp = await fetch("/board/feed", { headers: { "X-Bridge-Secret": secret } });
-  } catch (e) { return; }
-  if (resp.status === 401) {
-    document.getElementById("status").textContent = "密钥不对，请重新粘贴访问密钥。";
-    return;
-  }
-  if (!resp.ok) return;
-  const data = await resp.json();
-  const rows = data.records || [];
-  document.getElementById("recent").innerHTML = rows.map(r =>
-    "<div>" + r.created_at + " " + (r.kind || "电话") + " " + r.caller +
-    " <a target='_blank' href='" + recordUrl(r.rowid) + "'>记录 #" + r.rowid + "</a></div>"
-  ).join("") || "暂无记录。";
+async function api(url, opts) {
+  var r = await fetch(url, opts);
+  if (r.status === 401) { location.href = "/login"; throw new Error("unauth"); }
+  return r;
+}
+function kindPill(k) {
+  var cls = k === "未接" ? "pill-red" : (k === "留言" ? "pill-amber" : "pill-green");
+  return '<span class="pill ' + cls + '">' + esc(k) + '</span>';
+}
+function statusLabel(s) {
+  if (s === "Available") return ["dot-green", "接单中"];
+  if (s === "On Break") return ["dot-amber", "置忙"];
+  if (s === "Logged Out") return ["dot-gray", "未登录"];
+  return ["dot-gray", "未知"];
+}
+async function refreshMe() {
+  var r = await api("/desk/me");
+  var d = await r.json();
+  $("seatLabel").textContent = d.seat;
+  var st = statusLabel(d.status);
+  var pill = $("statusPill");
+  pill.className = "pill " + (st[0] === "dot-green" ? "pill-green" : (st[0] === "dot-amber" ? "pill-amber" : "pill-gray"));
+  pill.textContent = st[1];
+  if (d.status === "Available") $("busySwitch").checked = true;
+  if (d.status === "On Break") $("busySwitch").checked = false;
+  $("statToday").textContent = d.stats.calls_today;
+  $("statTotal").textContent = d.stats.calls_total;
+  $("statVm").textContent = d.stats.voicemails;
+  $("history").innerHTML = d.history.length ? d.history.map(function(h) {
+    return '<div class="hist">' + kindPill(h.kind) + " " + esc(h.caller) + " · " + esc(h.duration) +
+      '<span class="t">　' + esc(h.time) + '</span></div>';
+  }).join("") : '<div class="empty">暂无历史记录</div>';
+}
+async function refreshSeats() {
+  var r = await api("/desk/statuses");
+  var d = await r.json();
+  $("seatStrip").innerHTML = Object.keys(d.agents).sort().map(function(s) {
+    var st = statusLabel(d.agents[s]);
+    return '<span class="seat-chip"><span class="dot ' + st[0] + '"></span>' + esc(s) + " " + st[1] + "</span>";
+  }).join("");
+}
+async function refreshList() {
+  var q = new URLSearchParams({
+    caller: $("fCaller").value, kind: $("fKind").value,
+    date: $("fDate").value, offset: String(offset), limit: "50"
+  });
+  var r = await api("/desk/records?" + q.toString());
+  var d = await r.json();
+  var rows = d.records || [];
+  $("list").innerHTML = rows.length ? rows.map(function(rec) {
+    var note = (rec.service_type ? esc(rec.service_type) : "") +
+      (rec.question ? " · " + esc(rec.question) : "");
+    return '<div class="row" onclick="openRecord(' + rec.record_id + ')">' +
+      "<div>" + esc(rec.time) + "</div>" +
+      "<div>" + kindPill(rec.kind) + "</div>" +
+      '<div><span class="caller">' + esc(rec.caller) + "</span>" +
+      '<div class="q">' + (note || "未填写") + "</div></div>" +
+      "<div>" + esc(rec.agent || "") + "</div>" +
+      "<div>" + esc(rec.duration) + "</div></div>";
+  }).join("") : '<div class="empty">没有符合条件的记录</div>';
+  $("prevBtn").disabled = offset <= 0;
+  $("nextBtn").disabled = rows.length < 50;
+}
+function searchList() { offset = 0; refreshList(); }
+function changePage(step) {
+  offset = Math.max(0, offset + step * 50);
+  refreshList();
+}
+function exportXlsx() {
+  var days = parseInt($("fDays").value || "30", 10);
+  location.href = "/desk/export.xlsx?days=" + days;
+}
+async function openRecord(id) {
+  currentId = id;
+  var r = await api("/desk/records/" + id);
+  if (!r.ok) { $("detail").innerHTML = "<h2>记录详情</h2><div class='empty'>记录不存在</div>"; return; }
+  var d = await r.json();
+  var opts = SERVICE_TYPES.map(function(t) {
+    return '<option value="' + esc(t) + '"' + (t === d.service_type ? " selected" : "") + ">" + esc(t) + "</option>";
+  }).join("");
+  var audio = d.has_recording
+    ? '<audio controls src="/desk/records/' + d.record_id + '/recording"></audio>'
+    : '<div style="color:var(--muted)">无录音</div>';
+  var hint = d.history_hint
+    ? '<div class="msg msg-info">' + esc(d.history_hint) + "</div>" : "";
+  $("detail").innerHTML = "<h2>记录详情</h2>" + hint +
+    "<dl>" +
+    "<dt>登记时间</dt><dd>" + esc(d.time) + "</dd>" +
+    "<dt>联系电话</dt><dd>" + esc(d.caller) + "</dd>" +
+    "<dt>类型</dt><dd>" + kindPill(d.kind) + "</dd>" +
+    "<dt>客服人员</dt><dd>" + esc(d.agent || d.owner_seat || "") + "</dd>" +
+    "<dt>通话时长</dt><dd>" + esc(d.duration) + "</dd>" +
+    "<dt>通话ID</dt><dd>" + esc(d.call_id) + "</dd>" +
+    "<dt>录音</dt><dd>" + audio + "</dd>" +
+    "</dl>" +
+    "<label>服务类型</label><select id='fService'><option value=''></option>" + opts + "</select>" +
+    "<label>通话内容（客户问的什么问题）</label>" +
+    "<textarea id='fQuestion' rows='4'>" + esc(d.question) + "</textarea>" +
+    "<button class='btn' style='margin-top:14px' onclick='saveNotes()'>保存</button> " +
+    "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span>";
+  try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
+}
+async function saveNotes() {
+  if (!currentId) return;
+  var r = await api("/desk/records/" + currentId + "/notes", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ service_type: $("fService").value, question: $("fQuestion").value })
+  });
+  $("saveMsg").textContent = r.ok ? "已保存" : "保存失败";
+  if (r.ok) refreshList();
+}
+$("busySwitch").onchange = async function() {
+  var busy = !$("busySwitch").checked;
+  var r = await api("/desk/busy", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ busy: busy })
+  });
+  if (!r.ok) { alert("设置失败：话务层可能没有运行"); $("busySwitch").checked = !busy; return; }
+  refreshMe(); refreshSeats();
+};
+$("kindSeg").onclick = function(e) {
+  var btn = e.target.closest ? e.target.closest("button") : null;
+  if (!btn) return;
+  var buttons = $("kindSeg").getElementsByTagName("button");
+  for (var i = 0; i < buttons.length; i++) buttons[i].classList.remove("on");
+  btn.classList.add("on");
+  $("fKind").value = btn.getAttribute("data-kind");
+  searchList();
+};
+async function pollFeed() {
+  var r = await api("/desk/feed");
+  var d = await r.json();
+  var rows = d.records || [];
   if (!rows.length) return;
-  const newest = rows[0];
-  if (newest.rowid > baseline) {
-    baseline = newest.rowid;
-    const box = document.getElementById("alert");
-    box.style.display = "block";
-    box.textContent = "新来电 " + newest.caller + "，正在打开记录 #" + newest.rowid + "…";
-    document.getElementById("status").textContent = "新来电，正在打开记录…";
+  if (baseline && rows[0].rowid > baseline) {
+    var rec = rows[0];
+    $("alertText").innerHTML = "📞 新" + esc(rec.kind) + " <b>" + esc(rec.caller) + "</b>　正在打开记录…";
+    $("alert").classList.add("show");
     beep();
-    setTimeout(() => { location.href = recordUrl(newest.rowid); }, 2000);
+    openRecord(rec.rowid);
+    refreshList();
   }
+  baseline = rows[0].rowid;
 }
-const seatSel = document.getElementById("seat");
-seatSel.value = localStorage.getItem("board_seat") || "8001";
-seatSel.onchange = () => { localStorage.setItem("board_seat", seatSel.value); refreshSeat(); refreshHistory(); };
-async function refreshSeat() {
-  const secret = document.getElementById("secret").value.trim();
-  if (!secret) return;
-  let resp;
-  try { resp = await fetch("/agents/status", { headers: { "X-Bridge-Secret": secret } }); }
-  catch (e) { return; }
-  if (!resp.ok) return;
-  const data = await resp.json();
-  const agents = data.agents || {};
-  const mine = agents[seatSel.value];
-  const btn = document.getElementById("busyBtn");
-  btn.textContent = mine === "On Break" ? "置闲（恢复接单）" : "置忙";
-  btn.style.background = mine === "On Break" ? "#0e7a5f" : "#666";
-  const label = s => s === "Available" ? "接单中" : s === "On Break" ? "置忙" :
-    s === "Logged Out" ? "未登录" : "未知";
-  document.getElementById("seatStatus").innerHTML = Object.keys(agents).map(a =>
-    "<div>" + a + "：" + label(agents[a]) + (a === seatSel.value ? "（我）" : "") + "</div>"
-  ).join("") || "状态暂时查不到（话务层没接通时不影响看板弹单）。";
-}
-async function refreshHistory() {
-  const secret = document.getElementById("secret").value.trim();
-  if (!secret) return;
-  let resp;
-  try { resp = await fetch("/agents/me?seat=" + encodeURIComponent(seatSel.value),
-    { headers: { "X-Bridge-Secret": secret } }); }
-  catch (e) { return; }
-  if (!resp.ok) return;
-  const data = await resp.json();
-  const s = data.stats || {};
-  document.getElementById("myStats").innerHTML =
-    "今日接听 " + (s.calls_today || 0) + " 通 · 累计接听 " + (s.calls_total || 0) +
-    " 通 · 分派留言 " + (s.voicemails || 0) + " 条";
-  const rows = data.history || [];
-  document.getElementById("myHistory").innerHTML = rows.map(r =>
-    "<div>" + (r.time || "") + " " + r.kind + " " + r.caller + " " + (r.duration || "") +
-    (r.record_id ? " <a target='_blank' href='" + recordUrl(r.record_id) +
-      "'>记录 #" + r.record_id + "</a>" : "") + "</div>"
-  ).join("") || "暂无记录。";
-}
-document.getElementById("busyBtn").onclick = async () => {
-  const secret = document.getElementById("secret").value.trim();
-  if (!secret) { alert("请先在上面填访问密钥。"); return; }
-  const busy = document.getElementById("busyBtn").textContent === "置忙";
-  const resp = await fetch("/agents/busy", { method: "POST",
-    headers: { "X-Bridge-Secret": secret, "Content-Type": "application/json" },
-    body: JSON.stringify({ agent: seatSel.value, busy }) });
-  if (!resp.ok) { alert("设置失败，请看话务层是否在运行。"); return; }
-  localStorage.setItem("board_seat", seatSel.value);
-  refreshSeat();
-};
-document.getElementById("go").onclick = async () => {
-  const secret = document.getElementById("secret").value.trim();
-  localStorage.setItem("bridge_secret", secret);
-  localStorage.setItem("board_seat", seatSel.value);
-  try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
-  document.getElementById("status").textContent = "值班中，正在等来电…";
-  document.getElementById("go").disabled = true;
-  const resp = await fetch("/board/feed", { headers: { "X-Bridge-Secret": secret } });
-  if (resp.ok) {
-    const data = await resp.json();
-    const rows = data.records || [];
-    baseline = rows.length ? rows[0].rowid : 0;
-  }
-  watching = true;
-  timer = setInterval(poll, 2000);
-  poll();
-  refreshSeat();
-  refreshHistory();
-  setInterval(refreshSeat, 10000);
-  setInterval(refreshHistory, 10000);
-};
+refreshMe(); refreshSeats(); refreshList(); pollFeed();
+setInterval(pollFeed, 3000);
+setInterval(function() { refreshMe(); refreshSeats(); }, 30000);
+var params = new URLSearchParams(location.search);
+if (params.get("record")) { openRecord(parseInt(params.get("record"), 10)); }
 </script>
-</body>
-</html>
 """
+    return _page("工作台 - 自行车客服系统", body.replace("__SEAT__", html.escape(seat)),
+                 extra_css=DESK_CSS)
 
 
-@app.get("/board", response_class=HTMLResponse)
-def board_page():
-    """Agent board: keep open on shift; new records open themselves."""
-    return BOARD_PAGE_HTML
+# ------------------------------------------------------------------ routes
 
 
-@app.get("/board/feed")
-def board_feed(x_bridge_secret: str | None = Header(default=None)):
-    """Newest customer records, newest first (secret-protected)."""
-    check_secret(x_bridge_secret)
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    return RedirectResponse("/desk" if get_seat(request) else "/login")
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_get(request: Request):
+    if get_seat(request):
+        return RedirectResponse("/desk")
+    return login_page(_ROTATION_AGENTS, bridge.store.has_agents())
+
+
+@app.post("/login", response_class=HTMLResponse)
+async def login_post(request: Request):
+    form = await request.form()
+    seat = (form.get("seat") or "").strip()
+    password = form.get("password") or ""
+    if seat not in _ROTATION_AGENTS or not bridge.store.verify_agent(seat, password):
+        return login_page(_ROTATION_AGENTS, bridge.store.has_agents(),
+                          error="坐席或密码不对，请重试。")
+    token = bridge.store.create_session(seat)
+    # Login = Available by default: calls go to this seat unless the
+    # agent later sets themselves On Break. ESL down must not block
+    # login (queue status then shows 未知）.
+    bridge.set_agent_status(seat, "Available")
+    resp = RedirectResponse("/desk", status_code=303)
+    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                    max_age=12 * 3600, path="/")
+    return resp
+
+
+@app.post("/logout")
+async def logout_post(request: Request):
+    token = request.cookies.get(SESSION_COOKIE)
+    seat = bridge.store.delete_session(token) if token else None
+    if seat:
+        bridge.set_agent_status(seat, "Logged Out")
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return resp
+
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_get():
+    return setup_page(_ROTATION_AGENTS)
+
+
+@app.post("/setup", response_class=HTMLResponse)
+async def setup_post(request: Request):
+    form = await request.form()
+    secret = form.get("secret") or ""
+    if not BRIDGE_SECRET or secret != BRIDGE_SECRET:
+        return setup_page(_ROTATION_AGENTS,
+                          error="桥接密钥不对（或服务器还没有设置 BRIDGE_SECRET）。")
+    changed, errors = [], []
+    for seat in _ROTATION_AGENTS:
+        pw = form.get(f"pw_{seat}") or ""
+        pw2 = form.get(f"pw2_{seat}") or ""
+        if not pw:
+            continue
+        if pw != pw2:
+            errors.append(seat + " 两次密码不一致")
+            continue
+        bridge.store.set_agent_password(seat, pw)
+        changed.append(seat)
+    if errors:
+        return setup_page(_ROTATION_AGENTS, error="；".join(errors))
+    if not changed:
+        return setup_page(_ROTATION_AGENTS, error="没有填任何新密码。")
+    return setup_page(_ROTATION_AGENTS,
+                      ok="已保存：" + "、".join(changed) + "。坐席可以用新密码在 / 登录。")
+
+
+@app.get("/desk", response_class=HTMLResponse)
+def desk_get(request: Request):
+    seat = get_seat(request)
+    if not seat:
+        return RedirectResponse("/login")
+    try:
+        bridge.ensure_online(seat)
+    except Exception:
+        pass
+    return desk_page_html(seat)
+
+
+@app.get("/desk/feed")
+def desk_feed(request: Request):
+    require_seat(request)
     return {"records": bridge.store.recent_records(20)}
 
 
-@app.get("/agents/status")
-def agents_status(x_bridge_secret: str | None = Header(default=None)):
-    """Queue status per roster seat (secret-protected)."""
-    check_secret(x_bridge_secret)
+@app.get("/desk/me")
+def desk_me(request: Request):
+    seat = require_seat(request)
+    try:
+        bridge.ensure_online(seat)
+    except Exception:
+        pass
+    statuses = bridge.get_agent_statuses()
+    data = bridge.get_agent_history(seat)
+    data["status"] = statuses.get(seat, "unknown")
+    return data
+
+
+@app.get("/desk/statuses")
+def desk_statuses(request: Request):
+    require_seat(request)
     return {"agents": bridge.get_agent_statuses()}
 
 
-@app.get("/agents/me")
-def agents_me(seat: str, x_bridge_secret: str | None = Header(default=None)):
-    """One seat's homepage data: calls answered (today / total),
-    voicemails dispatched, and handled-contact history (secret-
-    protected). Seat must be on the roster."""
-    check_secret(x_bridge_secret)
-    if seat not in bridge.rotation_agents:
-        raise HTTPException(status_code=400, detail="unknown seat")
-    return bridge.get_agent_history(seat)
-
-
-@app.post("/agents/busy")
-async def agents_busy(request: Request, x_bridge_secret: str | None = Header(default=None)):
-    """Set one seat On Break (busy) or Available (secret-protected).
-    Body: {"agent": "8001", "busy": true}. Busy seats are skipped by
-    the queue and by voicemail dispatch until set back."""
-    check_secret(x_bridge_secret)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    agent = str((body or {}).get("agent") or "")
-    busy = bool((body or {}).get("busy"))
-    if agent not in bridge.rotation_agents:
-        raise HTTPException(status_code=400, detail="unknown seat")
-    ok, status = bridge.set_agent_busy(agent, busy)
+@app.post("/desk/busy")
+async def desk_busy(request: Request):
+    seat = require_seat(request)
+    body = await request.json()
+    target = "On Break" if body.get("busy") else "Available"
+    ok, status = bridge.set_agent_status(seat, target)
     if not ok:
         raise HTTPException(status_code=502, detail=status)
-    return {"ok": True, "agent": agent, "status": status}
+    return {"seat": seat, "status": status}
 
 
-# ------------------------------------------------------------------ records
-# The record system itself: list, detail, notes, audio. No workflow,
-# no states, no dispatch queue - a record is one row per contact.
-
-RECORDS_PAGE_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>通话记录 - 自行车客服系统</title>
-<style>
-  body { font-family: sans-serif; margin: 24px auto; max-width: 760px; padding: 0 16px; color: #222; }
-  h1 { font-size: 20px; }
-  label { display: block; margin: 10px 0 4px; font-size: 14px; }
-  input, select { width: 100%; padding: 9px; font-size: 15px; box-sizing: border-box; }
-  button { margin-top: 16px; padding: 11px 18px; font-size: 15px;
-           background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
-  button:disabled { background: #999; }
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
-  .hint { color: #666; font-size: 13px; line-height: 1.6; }
-  #list { margin-top: 20px; font-size: 14px; line-height: 1.9; }
-  #list a { color: #0e7a5f; }
-  #pager { margin-top: 16px; }
-  #pager button { background: #1a5fb4; margin-right: 10px; }
-  #msg { margin-top: 14px; font-size: 14px; color: #666; }
-</style>
-</head>
-<body>
-<h1>通话记录</h1>
-<p class="hint">这是全部通话记录：电话、未接、留言都在这里。点一条打开详情，
-可以听录音、补填客户问的什么问题。坐席值班弹屏请用 <a href="/board">来电看板</a>。</p>
-
-<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
-<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
-
-<div class="row">
-<div><label>客户电话（模糊搜）</label><input id="caller" placeholder="比如 138"></div>
-<div><label>坐席</label><select id="agent">
-  <option value="">全部坐席</option>
-  <option value="8001">8001</option>
-  <option value="8002">8002</option>
-  <option value="8003">8003</option>
-</select></div>
-<div><label>类型</label><select id="kind">
-  <option value="">全部类型</option>
-  <option value="电话">电话</option>
-  <option value="未接">未接</option>
-  <option value="留言">留言</option>
-</select></div>
-<div><label>导出范围（最近多少天）</label><input id="exp_days" value="30"></div>
-<div><label>开始日期</label><input id="date_from" type="date"></div>
-<div><label>结束日期</label><input id="date_to" type="date"></div>
-</div>
-
-<button id="search">搜索</button>
-<button id="export" style="background:#1a5fb4">导出 Excel</button>
-<div id="msg"></div>
-<div id="list"></div>
-<div id="pager">
-  <button id="prev">上一页</button>
-  <button id="next">下一页</button>
-  <span id="pageInfo" style="font-size:14px;"></span>
-</div>
-
-<script>
-let offset = 0;
-const LIMIT = 50;
-const params = new URLSearchParams(location.search);
-const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
-if (saved) document.getElementById("secret").value = saved;
-
-function query() {
-  const q = new URLSearchParams();
-  const v = id => document.getElementById(id).value.trim();
-  if (v("caller")) q.set("caller", v("caller"));
-  if (v("agent")) q.set("agent", v("agent"));
-  if (v("kind")) q.set("kind", v("kind"));
-  if (v("date_from")) q.set("date_from", v("date_from"));
-  if (v("date_to")) q.set("date_to", v("date_to"));
-  q.set("limit", LIMIT); q.set("offset", offset);
-  return q.toString();
-}
-async function load() {
-  const secret = document.getElementById("secret").value.trim();
-  localStorage.setItem("bridge_secret", secret);
-  const msg = document.getElementById("msg");
-  const list = document.getElementById("list");
-  msg.textContent = "正在查...";
-  let resp;
-  try {
-    resp = await fetch("/records/feed?" + query(), { headers: { "X-Bridge-Secret": secret } });
-  } catch (e) { msg.textContent = "请求失败：" + e; return; }
-  if (resp.status === 401) { msg.textContent = "密钥不对，请重新粘贴访问密钥。"; list.innerHTML = ""; return; }
-  if (!resp.ok) { msg.textContent = "查询失败：HTTP " + resp.status; return; }
-  const data = await resp.json();
-  const rows = data.records || [];
-  msg.textContent = rows.length ? "共 " + rows.length + " 条（本页）" : "没有符合条件的记录。";
-  document.getElementById("pageInfo").textContent = "第 " + (offset / LIMIT + 1) + " 页";
-  document.getElementById("prev").disabled = offset === 0;
-  document.getElementById("next").disabled = rows.length < LIMIT;
-  list.innerHTML = rows.map(r =>
-    "<div>" + (r.time || "") + " " + r.kind + " " + r.caller +
-    "（" + (r.agent || "未分派") + "，" + (r.duration || "") + "）" +
-    (r.service_type ? " " + r.service_type : "") +
-    (r.question ? " " + r.question.slice(0, 30) : "") +
-    " <a target='_blank' href='/records/" + r.record_id + "'>记录 #" + r.record_id + "</a></div>"
-  ).join("");
-}
-document.getElementById("search").onclick = () => { offset = 0; load(); };
-document.getElementById("prev").onclick = () => { offset = Math.max(0, offset - LIMIT); load(); };
-document.getElementById("next").onclick = () => { offset += LIMIT; load(); };
-document.getElementById("export").onclick = async () => {
-  const secret = document.getElementById("secret").value.trim();
-  localStorage.setItem("bridge_secret", secret);
-  const days = document.getElementById("exp_days").value.trim() || "30";
-  const msg = document.getElementById("msg");
-  try {
-    const resp = await fetch("/export/calls.xlsx?days=" + encodeURIComponent(days), {
-      headers: { "X-Bridge-Secret": secret }
-    });
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const blob = await resp.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "records.xlsx";
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-    msg.textContent = "导出成功，文件已开始下载。";
-  } catch (e) {
-    msg.textContent = "导出失败：" + e + "（常见原因：密钥不对）";
-  }
-};
-load();
-</script>
-</body>
-</html>
-"""
-
-SERVICE_TYPE_OPTIONS = ["", "还车异常", "借车异常", "锁桩故障", "车辆损坏",
-                        "掉链", "乱停放", "扣费退款", "其他"]
+@app.get("/desk/records")
+def desk_records(request: Request, caller: str = "", kind: str = "",
+                 date: str = "", offset: int = 0, limit: int = 50):
+    require_seat(request)
+    return {"records": bridge.store.list_records(
+        caller=caller, kind=kind, date_from=date, date_to=date,
+        offset=offset, limit=limit)}
 
 
-def record_detail_page(rec: dict, history_hint: str) -> str:
-    """Server-rendered record detail: fields, audio player, notes form."""
-    esc = html.escape
-    channel = {"电话": "热线电话", "留言": "语音留言",
-               "未接": "热线电话（未接）"}.get(rec["kind"], "热线电话")
-    if rec["has_recording"]:
-        audio = (f'<audio controls src="/records/{rec["record_id"]}/recording" '
-                 'style="width:100%;"></audio>')
-    else:
-        audio = "无录音"
-    options = ""
-    for opt in SERVICE_TYPE_OPTIONS:
-        sel = " selected" if opt == rec["service_type"] else ""
-        options += f'<option value="{esc(opt)}"{sel}>{esc(opt) or "（未填）"}</option>'
-    hint = (f'<p class="hint" style="color:#555;">历史提示：{esc(history_hint)}</p>'
-            if history_hint else "")
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>记录 #{rec["record_id"]} - 自行车客服系统</title>
-<style>
-  body {{ font-family: sans-serif; margin: 24px auto; max-width: 560px; padding: 0 16px; color: #222; }}
-  h1 {{ font-size: 20px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 15px; }}
-  td {{ padding: 8px 6px; border-bottom: 1px solid #eee; vertical-align: top; }}
-  td:first-child {{ color: #666; width: 96px; }}
-  label {{ display: block; margin: 14px 0 6px; font-size: 14px; }}
-  input, select, textarea {{ width: 100%; padding: 9px; font-size: 15px; box-sizing: border-box; }}
-  button {{ margin-top: 20px; width: 100%; padding: 12px; font-size: 16px;
-           background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }}
-  button:disabled {{ background: #999; }}
-  .hint {{ color: #666; font-size: 13px; line-height: 1.6; }}
-  #result {{ display: none; margin-top: 16px; padding: 12px; border-radius: 6px; font-size: 14px; }}
-  #result.ok {{ display: block; background: #e6f4ea; }}
-  #result.err {{ display: block; background: #fdecea; }}
-</style>
-</head>
-<body>
-<h1>通话记录 #{rec["record_id"]}</h1>
-<p><a href="/records">← 返回记录列表</a></p>
-<table>
-<tr><td>登记时间</td><td>{esc(rec["time"] or rec["created_at"])}</td></tr>
-<tr><td>联系电话</td><td>{esc(rec["caller"])}</td></tr>
-<tr><td>客服人员</td><td>{esc(rec["agent"] or rec["owner_seat"])}</td></tr>
-<tr><td>通话时长</td><td>{esc(rec["duration"])}</td></tr>
-<tr><td>服务途径</td><td>{esc(channel)}</td></tr>
-<tr><td>服务类型</td><td>{esc(rec["service_type"]) or "（未填）"}</td></tr>
-<tr><td>通话内容</td><td>{esc(rec["question"]) or "（未填）"}</td></tr>
-<tr><td>录音文件</td><td>{audio}</td></tr>
-<tr><td>通话ID</td><td>{esc(rec["call_id"])}</td></tr>
-</table>
-{hint}
-<h2 style="font-size:16px;margin-top:28px;">补填：客户问的什么问题</h2>
-<p class="hint">通话中或通话后在这里补填，保存后这条记录就完整了。</p>
-<label>服务类型</label>
-<select id="stype">{options}</select>
-<label>通话内容（客户问的什么问题）</label>
-<textarea id="question" rows="4">{esc(rec["question"])}</textarea>
-<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
-<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
-<button id="save">保存</button>
-<div id="result"></div>
-<script>
-  const saved = localStorage.getItem("bridge_secret") || "";
-  if (saved) document.getElementById("secret").value = saved;
-  document.getElementById("save").addEventListener("click", async () => {{
-    const btn = document.getElementById("save");
-    const box = document.getElementById("result");
-    const secret = document.getElementById("secret").value.trim();
-    localStorage.setItem("bridge_secret", secret);
-    btn.disabled = true; btn.textContent = "正在保存...";
-    box.style.display = "none";
-    try {{
-      const resp = await fetch("/records/{rec["record_id"]}/notes", {{
-        method: "POST",
-        headers: {{"Content-Type": "application/json", "X-Bridge-Secret": secret}},
-        body: JSON.stringify({{
-          question: document.getElementById("question").value,
-          service_type: document.getElementById("stype").value
-        }})
-      }});
-      const data = await resp.json();
-      box.style.display = "block";
-      if (resp.ok && data.ok) {{
-        box.className = "ok";
-        box.textContent = "已保存。";
-        setTimeout(() => location.reload(), 600);
-      }} else {{
-        box.className = "err";
-        box.textContent = "保存失败：" + JSON.stringify(data);
-      }}
-    }} catch (e) {{
-      box.style.display = "block"; box.className = "err";
-      box.textContent = "请求失败：" + e;
-    }}
-    btn.disabled = false; btn.textContent = "保存";
-  }});
-</script>
-</body>
-</html>"""
+@app.get("/desk/records/{record_id}")
+def desk_record(request: Request, record_id: int):
+    require_seat(request)
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    rec["history_hint"] = summarize_call_history(
+        bridge.store.calls_for_caller(rec["caller"],
+                                      exclude_call_id=rec["call_id"]))
+    return rec
+
+
+@app.post("/desk/records/{record_id}/notes")
+async def desk_record_notes(request: Request, record_id: int):
+    require_seat(request)
+    body = await request.json()
+    ok = bridge.store.set_notes(record_id, body.get("question") or "",
+                                body.get("service_type") or "")
+    if not ok:
+        raise HTTPException(status_code=404, detail="record not found")
+    return {"ok": True}
+
+
+@app.get("/desk/records/{record_id}/recording")
+def desk_record_recording(request: Request, record_id: int):
+    require_seat(request)
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    path = find_recording_file(rec.get("recording_file") or "")
+    if not path:
+        raise HTTPException(status_code=404, detail="no recording")
+    return Response(open(path, "rb").read(), media_type="audio/wav")
+
+
+@app.get("/desk/export.xlsx")
+def desk_export(request: Request, days: int = 30):
+    require_seat(request)
+    days = max(1, min(days, 365))
+    start = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    rows = [call_row(r) for r in bridge.store.list_calls(start)]
+    stamp = datetime.now().strftime("%Y%m%d")
+    return _xlsx_response(build_xlsx([("通话记录", CALL_COLUMNS, rows)]),
+                          f"records_{stamp}.xlsx")
+
+
+# Old bookmarks keep working: everything now lives on the desk.
+@app.get("/board", response_class=HTMLResponse)
+def board_legacy():
+    return RedirectResponse("/desk")
 
 
 @app.get("/records", response_class=HTMLResponse)
-def records_page():
-    """Record list page: search + browse all call records."""
-    return RECORDS_PAGE_HTML
-
-
-@app.get("/records/feed")
-def records_feed(caller: str = "", agent: str = "", kind: str = "",
-                 date_from: str = "", date_to: str = "",
-                 limit: int = 50, offset: int = 0,
-                 x_bridge_secret: str | None = Header(default=None)):
-    """Record rows as JSON, newest first (secret-protected).
-    Filters: caller substring, agent seat, kind 电话/未接/留言,
-    date_from/date_to as YYYY-MM-DD (Asia/Shanghai)."""
-    check_secret(x_bridge_secret)
-    return {"records": bridge.store.list_records(
-        caller, agent, kind, date_from, date_to, limit, offset)}
+def records_legacy():
+    return RedirectResponse("/desk")
 
 
 @app.get("/records/{record_id}", response_class=HTMLResponse)
-def record_page(record_id: int):
-    """One record's detail: fields, recording player, notes form."""
-    rec = bridge.store.get_record(record_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="record not found")
-    try:
-        hint = summarize_call_history(
-            bridge.store.calls_for_caller(rec["caller"], rec["call_id"]))
-    except Exception:
-        hint = ""
-    return record_detail_page(rec, hint)
-
-
-@app.get("/records/{record_id}/recording")
-def record_recording(record_id: int):
-    """The record's recording audio (from the shared recordings volume)."""
-    rec = bridge.store.get_record(record_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="record not found")
-    path = find_recording_file(rec["recording_file"])
-    if not path:
-        raise HTTPException(status_code=404, detail="no recording file")
-    with open(path, "rb") as f:
-        data = f.read()
-    return Response(content=data, media_type="audio/wav",
-                    headers={"Content-Disposition": f"inline; filename={record_id}.wav"})
-
-
-@app.post("/records/{record_id}/notes")
-async def record_notes(record_id: int, request: Request,
-                       x_bridge_secret: str | None = Header(default=None)):
-    """Agent fills in the question + service type (secret-protected)."""
-    check_secret(x_bridge_secret)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    ok = bridge.store.set_notes(
-        record_id,
-        str((body or {}).get("question") or ""),
-        str((body or {}).get("service_type") or ""))
-    if not ok:
-        raise HTTPException(status_code=404, detail="record not found")
-    return {"ok": True, "record_id": record_id}
+def record_legacy(record_id: int):
+    return RedirectResponse(f"/desk?record={record_id}")

@@ -345,3 +345,120 @@ class TestAgentHistory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import sqlite3
+
+
+def _backdate_session(tmp, token, created_ago=0, seen_ago=0):
+    now = int(time.time())
+    with sqlite3.connect(os.path.join(tmp, "b.db")) as c:
+        c.execute("UPDATE sessions SET created_at=?, last_seen=? WHERE token=?",
+                  (now - created_ago, now - seen_ago, token))
+
+
+class TestSeatAccounts(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bridge = make_bridge(self.tmp)
+
+    def test_password_verify_reset_and_hashing(self):
+        store = self.bridge.store
+        self.assertFalse(store.has_agents())
+        store.set_agent_password("8001", "pw-one")
+        self.assertTrue(store.has_agents())
+        self.assertTrue(store.verify_agent("8001", "pw-one"))
+        self.assertFalse(store.verify_agent("8001", "wrong"))
+        self.assertFalse(store.verify_agent("8002", "pw-one"))
+        self.assertFalse(store.verify_agent("8001", ""))
+        with sqlite3.connect(os.path.join(self.tmp, "b.db")) as c:
+            salt, pw_hash = c.execute(
+                "SELECT salt, pw_hash FROM agents WHERE login='8001'").fetchone()
+        self.assertTrue(salt and pw_hash and pw_hash != "pw-one")
+        store.set_agent_password("8001", "pw-two")
+        self.assertFalse(store.verify_agent("8001", "pw-one"))
+        self.assertTrue(store.verify_agent("8001", "pw-two"))
+
+    def test_session_lifecycle_and_expiry(self):
+        store = self.bridge.store
+        token = store.create_session("8001")
+        self.assertEqual(store.get_session_seat(token), "8001")
+        self.assertEqual(store.get_session_seat("nope"), None)
+        self.assertEqual(store.delete_session(token), "8001")
+        self.assertEqual(store.get_session_seat(token), None)
+        self.assertEqual(store.delete_session(token), None)
+        old = store.create_session("8002")
+        _backdate_session(self.tmp, old, created_ago=13 * 3600)
+        self.assertEqual(store.get_session_seat(old), None)
+
+    def test_live_and_any_session_sets_and_purge(self):
+        store = self.bridge.store
+        live = store.create_session("8001")
+        stale = store.create_session("8002")
+        _backdate_session(self.tmp, stale, seen_ago=700)
+        self.assertEqual(store.seats_with_live_sessions(), {"8001"})
+        self.assertEqual(store.seats_with_any_session(), {"8001", "8002"})
+        _backdate_session(self.tmp, stale, created_ago=13 * 3600, seen_ago=700)
+        store.purge_expired_sessions()
+        self.assertEqual(store.seats_with_any_session(), {"8001"})
+        self.assertEqual(store.get_session_seat(live), "8001")
+
+
+class TestAgentStatus(unittest.TestCase):
+    def setUp(self):
+        import bridge_core
+        self.tmp = tempfile.mkdtemp()
+        self.bridge = make_bridge(self.tmp)
+        self.commands = []
+        self.table = ("name|status\n"
+                      "8001|Available\n8002|On Break\n8003|Logged Out\n")
+
+        def stub(cmd):
+            self.commands.append(cmd)
+            if cmd.startswith("callcenter_config agent list"):
+                return self.table
+            if cmd.startswith("callcenter_config agent set status"):
+                return "+OK"
+            return None
+
+        self._orig_esl = bridge_core.esl_command
+        bridge_core.esl_command = stub
+        self.addCleanup(setattr, bridge_core, "esl_command", self._orig_esl)
+
+    def test_set_agent_status_validates_and_reports(self):
+        ok, status = self.bridge.set_agent_status("8001", "On Break")
+        self.assertTrue(ok and status == "On Break")
+        self.assertTrue(any("On Break" in c for c in self.commands))
+        ok, _ = self.bridge.set_agent_status("8001", "Busy")
+        self.assertFalse(ok)
+
+    def test_set_agent_status_esl_down(self):
+        import bridge_core
+        bridge_core.esl_command = lambda cmd: None
+        ok, _ = self.bridge.set_agent_status("8001", "Available")
+        self.assertFalse(ok)
+
+    def test_ensure_online_only_revives_logged_out(self):
+        self.assertTrue(self.bridge.ensure_online("8003"))
+        self.assertTrue(any("8003" in c and "Available" in c for c in self.commands))
+        before = len(self.commands)
+        self.assertFalse(self.bridge.ensure_online("8002"))  # On Break: untouched
+        self.assertTrue(self.bridge.ensure_online("8001"))   # Available: untouched
+        self.assertEqual(len(self.commands), before + 2)  # two list calls only
+
+    def test_logout_stale_seats(self):
+        store = self.bridge.store
+        store.create_session("8002")  # live heartbeat: never touched
+        stale = store.create_session("8001")
+        _backdate_session(self.tmp, stale, seen_ago=700)
+        out = self.bridge.logout_stale_seats()
+        self.assertEqual(out, ["8001"])
+        self.assertTrue(any("8001" in c and "Logged Out" in c for c in self.commands))
+        self.assertFalse(any("8002" in c and "Logged Out" in c for c in self.commands))
+
+    def test_logout_stale_seats_esl_down_is_noop(self):
+        import bridge_core
+        bridge_core.esl_command = lambda cmd: None
+        stale = self.bridge.store.create_session("8001")
+        _backdate_session(self.tmp, stale, seen_ago=700)
+        self.assertEqual(self.bridge.logout_stale_seats(), [])

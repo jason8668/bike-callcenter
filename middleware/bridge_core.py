@@ -16,8 +16,11 @@ Key invariants:
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional
@@ -261,6 +264,23 @@ class CallStore:
                 "CREATE TABLE IF NOT EXISTS meta ("
                 " key TEXT PRIMARY KEY, value TEXT)"
             )
+            # Seat accounts for the unified login: login is the seat
+            # number (8001/8002/8003); passwords are stored hashed
+            # (pbkdf2, per-account salt), never in plain text. Set via
+            # the /setup page (BRIDGE_SECRET-protected), not by agents.
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS agents ("
+                " login TEXT PRIMARY KEY, salt TEXT, pw_hash TEXT)"
+            )
+            # Login sessions: token -> seat, with absolute expiry
+            # (12h) and a last_seen heartbeat. The desk page touches
+            # its session on every poll, so closing the browser lets
+            # the seat go stale and the cleanup logs it out.
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS sessions ("
+                " token TEXT PRIMARY KEY, seat TEXT,"
+                " created_at INTEGER, last_seen INTEGER)"
+            )
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -289,6 +309,105 @@ class CallStore:
             new = 1
         self.meta_set(key, str(new))
         return new
+
+    # ---------------------------------------------------------- accounts
+    SESSION_TTL_SEC = 12 * 3600      # absolute session lifetime
+    SESSION_STALE_SEC = 600          # no heartbeat for this long = stale
+
+    @staticmethod
+    def _hash_password(password: str, salt_hex: str) -> str:
+        return hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt_hex),
+            200_000).hex()
+
+    def set_agent_password(self, login: str, password: str) -> None:
+        """Create or reset one seat account (password hashed, never
+        stored plain). Called from the /setup page, not by agents."""
+        salt = secrets.token_hex(16)
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO agents (login, salt, pw_hash) VALUES (?,?,?)"
+                " ON CONFLICT(login) DO UPDATE SET salt=excluded.salt,"
+                " pw_hash=excluded.pw_hash",
+                (login, salt, self._hash_password(password, salt)))
+
+    def has_agents(self) -> bool:
+        with self._conn() as c:
+            row = c.execute("SELECT COUNT(*) FROM agents").fetchone()
+        return bool(row and row[0])
+
+    def verify_agent(self, login: str, password: str) -> bool:
+        """True when this seat account exists and the password matches."""
+        if not login or not password:
+            return False
+        with self._conn() as c:
+            row = c.execute("SELECT salt, pw_hash FROM agents WHERE login=?",
+                            (login,)).fetchone()
+        if not row:
+            return False
+        try:
+            return secrets.compare_digest(
+                self._hash_password(password, row[0]), row[1])
+        except (ValueError, TypeError):
+            return False
+
+    def create_session(self, seat: str) -> str:
+        """New login session token for a seat (12h absolute)."""
+        token = secrets.token_urlsafe(32)
+        now = int(time.time())
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO sessions (token, seat, created_at, last_seen)"
+                " VALUES (?,?,?,?)", (token, seat, now, now))
+        return token
+
+    def get_session_seat(self, token: str) -> Optional[str]:
+        """Seat for a live session token, touching its heartbeat.
+        Returns None for unknown or absolutely-expired tokens."""
+        if not token:
+            return None
+        now = int(time.time())
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT seat, created_at FROM sessions WHERE token=?",
+                (token,)).fetchone()
+            if not row or now - row[1] > self.SESSION_TTL_SEC:
+                return None
+            c.execute("UPDATE sessions SET last_seen=? WHERE token=?",
+                      (now, token))
+        return row[0]
+
+    def delete_session(self, token: str) -> Optional[str]:
+        """Drop one session, returning its seat (for logout handling)."""
+        if not token:
+            return None
+        with self._conn() as c:
+            row = c.execute("SELECT seat FROM sessions WHERE token=?",
+                            (token,)).fetchone()
+            c.execute("DELETE FROM sessions WHERE token=?", (token,))
+        return row[0] if row else None
+
+    def seats_with_live_sessions(self) -> set:
+        """Seats with at least one session heartbeating recently."""
+        now = int(time.time())
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT seat FROM sessions"
+                " WHERE last_seen >= ?", (now - self.SESSION_STALE_SEC,)).fetchall()
+        return {r[0] for r in rows}
+
+    def seats_with_any_session(self) -> set:
+        """Seats that ever logged in (cleanup candidates)."""
+        with self._conn() as c:
+            rows = c.execute("SELECT DISTINCT seat FROM sessions").fetchall()
+        return {r[0] for r in rows}
+
+    def purge_expired_sessions(self) -> None:
+        """Drop sessions past their absolute lifetime."""
+        now = int(time.time())
+        with self._conn() as c:
+            c.execute("DELETE FROM sessions WHERE created_at < ?",
+                      (now - self.SESSION_TTL_SEC,))
 
     def answered_calls_by_agent(self, agent: str) -> int:
         """Answered inbound calls handled by one agent (the queue CDRs
@@ -600,14 +719,49 @@ class Bridge:
             "history": self.store.agent_history(seat),
         }
 
-    def set_agent_busy(self, agent: str, busy: bool) -> tuple[bool, str]:
-        """Set one seat On Break (busy) or Available, via the queue.
-        Returns (ok, status-or-error)."""
-        target = "On Break" if busy else "Available"
-        out = esl_command(f"callcenter_config agent set status {agent} '{target}'")
+    def set_agent_status(self, agent: str, status: str) -> tuple[bool, str]:
+        """Set one seat's queue status - Available, On Break, or
+        Logged Out - via the event socket. Returns (ok, status-or-error).
+        Login uses Available, logout uses Logged Out, the busy toggle
+        uses On Break/Available."""
+        if status not in ("Available", "On Break", "Logged Out"):
+            return False, "unknown status"
+        out = esl_command(f"callcenter_config agent set status {agent} '{status}'")
         if out and out.strip().startswith("+OK"):
-            return True, target
+            return True, status
         return False, (out or "event socket unreachable").strip()[:200]
+
+    def ensure_online(self, seat: str) -> bool:
+        """Re-assert Available for a seat that is Logged Out (e.g. an
+        agent who reopened the desk after the stale cleanup logged them
+        out). On Break seats are never touched. Returns True when the
+        seat is (now) Available."""
+        statuses = self._agent_statuses()
+        current = statuses.get(seat)
+        if current == "Logged Out":
+            ok, _ = self.set_agent_status(seat, "Available")
+            return ok
+        return current == "Available"
+
+    def logout_stale_seats(self) -> list:
+        """Log out seats whose sessions all went stale (browser closed
+        without logout, heartbeat gone for 10+ minutes). Only seats
+        that ever logged in are touched; ESL failures are skipped
+        silently so a later pass retries. Returns logged-out seats."""
+        live = self.store.seats_with_live_sessions()
+        candidates = self.store.seats_with_any_session() - live
+        if not candidates:
+            self.store.purge_expired_sessions()
+            return []
+        statuses = self._agent_statuses()
+        out = []
+        for seat in sorted(candidates):
+            if statuses.get(seat) in ("Available", "On Break"):
+                ok, _ = self.set_agent_status(seat, "Logged Out")
+                if ok:
+                    out.append(seat)
+        self.store.purge_expired_sessions()
+        return out
 
     def _next_voicemail_owner(self) -> Optional[str]:
         """Fewest-calls dispatch for a voicemail record: among seats
