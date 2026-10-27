@@ -1,9 +1,10 @@
 -- zammad_bridge.lua
--- FreeSWITCH Lua hook: pushes call events to the bridge middleware so Zammad
--- can pop the caller card (newCall/answer) in real time.
--- The ticket is opened on answer (so agents can take notes during the
--- call); only the recording is attached on hangup via mod_json_cdr ->
--- POST /cdr, so this script stays fast and never blocks the call.
+-- FreeSWITCH Lua hook: pushes call events to the bridge middleware so the
+-- agent board can pop the record (newCall/answer) in real time.
+-- The record is opened on answer (so agents can take notes during the
+-- call); only duration and recording path are filled in on hangup via
+-- mod_json_cdr -> POST /cdr, so this script stays fast and never blocks
+-- the call.
 --
 -- Install: the Docker image copies this file to
 -- /usr/share/freeswitch/scripts/. The queue dialplan sets

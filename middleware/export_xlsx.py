@@ -17,18 +17,10 @@ from xml.sax.saxutils import escape
 XLSX_MIME = ("application/vnd.openxmlformats-officedocument."
              "spreadsheetml.sheet")
 
-# (column header, width in characters)
-TICKET_COLUMNS = [
-    ("工单号", 10), ("标题", 42), ("工单类型", 12), ("服务类型", 12),
-    ("状态", 10), ("优先级", 8), ("分组", 10), ("客户电话", 14),
-    ("单车编号", 12), ("服务地点", 20), ("通话ID", 34), ("录音地址", 30),
-    ("投诉等级", 10), ("创建时间", 20), ("更新时间", 20),
-]
-
 CALL_COLUMNS = [
-    ("CallID", 34), ("主叫", 14), ("被叫", 14), ("方向", 8),
-    ("是否接通", 10), ("通话时长(秒)", 12), ("等待时长(秒)", 12),
-    ("开始时间", 20), ("关联工单", 10),
+    ("登记时间", 20), ("联系电话", 14), ("客服人员", 10), ("通话时长", 12),
+    ("服务途径", 10), ("服务类型", 12), ("通话内容", 42), ("录音文件", 30),
+    ("通话ID", 34),
 ]
 
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -60,51 +52,21 @@ def format_ts(epoch) -> str:
     return datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def ticket_row(t: dict, state_map: dict, priority_map: dict,
-               group_map: dict, phone_map: dict) -> list:
-    """Flatten one Zammad ticket dict into an export row.
-
-    Custom bike fields (call_id, recording_url, bike_no, ticket_type,
-    fault_type, complaint_level, service_address) are read straight off
-    the ticket object, matching the attributes created by
-    zammad-setup/setup_bike_fields.py.
-    """
-    t = t or {}
-    phone = ""
-    title = str(t.get("title") or "")
-    # Bridge-created call tickets are titled "电话工单 <caller> <type>".
-    if title.startswith("电话工单 "):
-        parts = title.split()
-        if len(parts) > 1:
-            phone = parts[1]
-    if not phone:
-        phone = str(phone_map.get(t.get("customer_id"), "") or "")
+def call_row(r: dict) -> list:
+    """Flatten one record dict from CallStore.list_calls into an
+    export row (legacy 通话记录 columns)."""
+    r = r or {}
+    channel = "语音留言" if r.get("kind") == "留言" else "热线电话"
+    duration = r.get("duration_sec") or 0
+    if not r.get("answered") and r.get("kind") == "未接":
+        duration_text = "未接"
+    else:
+        duration_text = f"{duration // 60}分{duration % 60:02d}秒"
     return [
-        t.get("id"), title,
-        t.get("ticket_type") or "", t.get("fault_type") or "",
-        state_map.get(t.get("state_id"), t.get("state_id")),
-        priority_map.get(t.get("priority_id"), t.get("priority_id")),
-        group_map.get(t.get("group_id"), t.get("group_id")),
-        phone,
-        t.get("bike_no") or "", t.get("service_address") or "",
-        t.get("call_id") or "", t.get("recording_url") or "",
-        t.get("complaint_level") or "",
-        t.get("created_at") or "", t.get("updated_at") or "",
-    ]
-
-
-def call_row(r: tuple) -> list:
-    """Flatten one SQLite calls row:
-    (call_id, caller, callee, direction, answered, duration_sec,
-     wait_sec, start_epoch, ticket_id)."""
-    (call_id, caller, callee, direction, answered,
-     duration_sec, wait_sec, start_epoch, ticket_id) = r
-    return [
-        call_id or "", caller or "", callee or "",
-        "呼入" if direction == "in" else ("呼出" if direction == "out" else direction or ""),
-        "是" if answered else "否",
-        duration_sec or 0, wait_sec or 0,
-        format_ts(start_epoch), ticket_id or "",
+        format_ts(r.get("start_epoch")), r.get("caller") or "",
+        r.get("agent") or "", duration_text, channel,
+        r.get("service_type") or "", r.get("question") or "",
+        r.get("recording_file") or "", r.get("call_id") or "",
     ]
 
 

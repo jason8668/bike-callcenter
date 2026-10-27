@@ -1,5 +1,6 @@
-# Bridge middleware + FreeSWITCH. Zammad itself runs from the official
-# zammad-docker-compose stack (cloned by install-server.sh into ./zammad).
+# Record service (bridge middleware) + FreeSWITCH. No Zammad: this is a
+# record system, not a ticket system - the bridge itself stores the call
+# records and serves the record list/detail pages on port 8890.
 # FreeSWITCH runs with host networking so SIP/RTP need no NAT tricks and
 # 127.0.0.1:8890 reaches the bridge's published port.
 services:
@@ -10,9 +11,6 @@ services:
     env_file:
       - ../middleware/.env
     mem_limit: 256m
-    environment:
-      # Reach Zammad's nginx on the host-published port 8899.
-      ZAMMAD_URL: http://host.docker.internal:8899
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -42,7 +40,7 @@ services:
       # freeswitch/conf-templates/ (passwords + secret, never in Git).
       - ../freeswitch/conf-live:/etc/freeswitch
       # Same recordings volume as the bridge, so CDR/voicemail paths
-      # resolve to the same files the bridge attaches to tickets.
+      # resolve to the same files the record detail page plays back.
       - ../recordings:/recordings
 
 volumes:

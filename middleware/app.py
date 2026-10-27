@@ -1,60 +1,50 @@
-"""Bridge service entrypoint (FastAPI).
+"""Record service entrypoint (FastAPI).
 
 Run: uvicorn app:app --host 0.0.0.0 --port 8090
 Env: see .env.example. All secrets live in .env only, never in Git.
+
+This is a RECORD system, not a ticket system: no Zammad, no workflow.
+Pages: /records (record list), /records/<id> (detail + notes + audio),
+/board (agent pop-up board), /test (simulated calls without a line).
 """
+import html
 import os
-import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 
-from bridge_core import Bridge, CallStore, ZammadClient, parse_cdr
-from export_xlsx import (CALL_COLUMNS, TICKET_COLUMNS, XLSX_MIME, build_xlsx,
-                         call_row, ticket_row)
+from bridge_core import Bridge, CallStore, summarize_call_history
+from export_xlsx import CALL_COLUMNS, XLSX_MIME, build_xlsx, call_row
 
-ZAMMAD_URL = os.environ.get("ZAMMAD_URL", "http://zammad-nginx:8080")
-ZAMMAD_TOKEN = os.environ.get("ZAMMAD_TOKEN", "")
-ZAMMAD_CTI_TOKEN = os.environ.get("ZAMMAD_CTI_TOKEN", "")
 BRIDGE_SECRET = os.environ.get("BRIDGE_SECRET", "")
 RECORDING_DIR = os.environ.get("RECORDING_DIR", "/recordings")
 DB_PATH = os.environ.get("BRIDGE_DB", "/data/bridge.db")
 
 
-def read_recording(rec) -> bytes | None:
-    """Recording bytes from the shared recordings volume, or via HTTP URL."""
-    if rec.recording_path:
-        candidate = rec.recording_path
-        if not os.path.isabs(candidate):
-            candidate = os.path.join(RECORDING_DIR, candidate)
-        # recording_path may be the FreeSWITCH-host absolute path; also try by name
-        for path in (candidate, os.path.join(RECORDING_DIR, os.path.basename(candidate))):
-            if os.path.isfile(path):
-                with open(path, "rb") as f:
-                    return f.read()
-    if rec.recording_url.startswith("http"):
-        try:
-            with urllib.request.urlopen(rec.recording_url, timeout=20) as r:
-                return r.read()
-        except Exception:
-            return None
+def find_recording_file(stored_path: str) -> str | None:
+    """Resolve a stored recording path to a file on disk, or None.
+    Stored paths may be the FreeSWITCH-host absolute path or just a
+    filename; both are tried against the shared recordings volume."""
+    if not stored_path:
+        return None
+    candidates = [stored_path]
+    if not os.path.isabs(stored_path):
+        candidates.append(os.path.join(RECORDING_DIR, stored_path))
+    candidates.append(os.path.join(RECORDING_DIR, os.path.basename(stored_path)))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
     return None
 
 
-_TICKET_CUSTOMER_ID = os.environ.get("TICKET_CUSTOMER_ID", "")
-# Seat logins in roster order for voicemail dispatch (fewest-calls).
-# Keep these equal to the agent Zammad logins (seat numbers by default)
-# so queue CDRs (cc_agent) line up with the roster.
+# Seat numbers in roster order for voicemail dispatch (fewest-calls).
+# These are the FreeSWITCH extensions, so queue CDRs (cc_agent) line up.
 _ROTATION_AGENTS = [a.strip() for a in
                     os.environ.get("ROTATION_AGENTS", "8001,8002,8003").split(",")
                     if a.strip()]
 bridge = Bridge(
-    zammad=ZammadClient(
-        ZAMMAD_URL, ZAMMAD_TOKEN, cti_token=ZAMMAD_CTI_TOKEN,
-        ticket_customer_id=int(_TICKET_CUSTOMER_ID) if _TICKET_CUSTOMER_ID.isdigit() else None),
     store=CallStore(DB_PATH),
-    recording_reader=read_recording,
     rotation_agents=_ROTATION_AGENTS,
 )
 
@@ -97,7 +87,7 @@ async def cdr(request: Request, x_bridge_secret: str | None = Header(default=Non
 @app.post("/events/voicemail")
 async def voicemail_event(request: Request, x_bridge_secret: str | None = Header(default=None)):
     """Ingest one finished voicemail (posted by the FreeSWITCH hangup hook
-    once telephony is live): creates the 语音留言 ticket with recording."""
+    once telephony is live): creates the 语音留言 record with recording."""
     check_secret(x_bridge_secret)
     payload = await request.json()
     return bridge.handle_voicemail(payload)
@@ -114,63 +104,19 @@ def _xlsx_response(data: bytes, filename: str) -> Response:
         headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
-@app.get("/export/tickets.xlsx")
-def export_tickets(days: int = 30, group: str = "", type: str = "",
-                   x_bridge_secret: str | None = Header(default=None)):
-    """Export the ticket list as .xlsx (mirrors the legacy system's 导出 Excel).
-
-    Query: days=30 (1..365), group=报修组 (optional), type=故障报修 (optional).
-    Columns: 工单号/标题/工单类型/服务类型/状态/优先级/分组/客户电话/
-    单车编号/服务地点/通话ID/录音地址/投诉等级/创建时间/更新时间.
-    """
-    check_secret(x_bridge_secret)
-    days = max(1, min(days, 365))
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    tickets: list = []
-    for page in range(1, 21):  # hard cap: 2000 tickets per export
-        batch = bridge.zammad.search_tickets(f"created_at:>{since}",
-                                             page=page, per_page=100)
-        if not batch:
-            break
-        tickets.extend(batch)
-        if len(batch) < 100:
-            break
-    state_map = bridge.zammad.id_name_map("/api/v1/ticket_states")
-    priority_map = bridge.zammad.id_name_map("/api/v1/ticket_priorities")
-    group_map = bridge.zammad.id_name_map("/api/v1/groups")
-    phone_map: dict = {}
-
-    def want(t: dict) -> bool:
-        if group and group_map.get(t.get("group_id")) != group:
-            return False
-        if type and str(t.get("ticket_type") or "") != type:
-            return False
-        return True
-
-    rows = []
-    for t in tickets:
-        if not want(t):
-            continue
-        uid = t.get("customer_id")
-        if uid and uid not in phone_map:
-            phone_map[uid] = bridge.zammad.get_user_phone(uid)
-        rows.append(ticket_row(t, state_map, priority_map, group_map, phone_map))
-    stamp = datetime.now().strftime("%Y%m%d")
-    return _xlsx_response(build_xlsx([("工单列表", TICKET_COLUMNS, rows)]),
-                          f"tickets_{stamp}.xlsx")
-
-
 @app.get("/export/calls.xlsx")
 def export_calls(days: int = 30,
                  x_bridge_secret: str | None = Header(default=None)):
-    """Export call records (the bridge's SQLite CDR store) as .xlsx."""
+    """Export call records (the bridge's SQLite record store) as .xlsx.
+    Columns mirror the legacy 通话记录 list: time, caller, agent,
+    duration, channel, service type, question notes, recording file, CallID."""
     check_secret(x_bridge_secret)
     days = max(1, min(days, 365))
     start = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
     rows = [call_row(r) for r in bridge.store.list_calls(start)]
     stamp = datetime.now().strftime("%Y%m%d")
     return _xlsx_response(build_xlsx([("通话记录", CALL_COLUMNS, rows)]),
-                          f"calls_{stamp}.xlsx")
+                          f"records_{stamp}.xlsx")
 
 
 TEST_PAGE_HTML = """<!DOCTYPE html>
@@ -196,9 +142,9 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <body>
 <h1>模拟来电测试</h1>
 <p class="hint">还没有接电话线路时，用这个页面模拟一通客户来电：系统会像真来电一样
-弹出来电提示，接通时工单就自动弹出来（带电话号码），坐席可以在通话过程中
-记录；通话结束后录音自动附到这张工单上。来电不带任何预分类：工单先进入客服组，
-由坐席在工单里填写服务类型等信息。</p>
+弹出来电提示，接通时记录就自动弹出来（带电话号码），坐席可以在通话过程中
+记录问题；通话结束后录音自动绑到这条记录上。来电不带任何预分类：记录先
+进入记录列表，由坐席在记录里填写服务类型等信息。</p>
 
 <label>客户手机号码</label>
 <input id="caller" value="13800000000">
@@ -209,13 +155,13 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <button id="go">发起模拟来电</button>
 <div id="result"></div>
 
-<p class="hint">操作顺序：先打开并登录客服系统（端口 8899 的页面）并保持页面开着，
-再回到本页点按钮，然后切回客服系统页面看弹屏和新工单。</p>
+<p class="hint">操作顺序：先打开坐席来电看板（/board）并点“开始值班”，
+再回到本页点按钮，然后切回看板页面看弹屏和新记录。</p>
 
 <hr>
 <h1>模拟语音留言</h1>
-<p class="hint">模拟客户在无人接听时留了一条语音留言：系统会生成一张「语音留言」工单
-（在客服组），留言录音作为附件绑在工单上。坐席在客服系统左侧概览「语音留言」里处理。</p>
+<p class="hint">模拟客户在无人接听时留了一条语音留言：系统会生成一条「语音留言」记录，
+留言录音绑在这条记录上。坐席在记录列表里按类型筛选留言处理。</p>
 
 <label>留言客户手机号码</label>
 <input id="vm_caller" value="13900000000">
@@ -224,13 +170,13 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 
 <hr>
 <h1>导出 Excel</h1>
-<p class="hint">把工单列表或通话记录导出成 Excel 表格（.xlsx），和老系统的「导出 Excel」对应：
-工单号、客户电话、服务类型、状态、通话ID、录音地址等字段都在里面。</p>
+<p class="hint">把通话记录导出成 Excel 表格（.xlsx），和老系统的「导出 Excel」对应：
+登记时间、联系电话、客服人员、通话时长、服务途径、服务类型、通话内容、
+录音文件、通话ID等字段都在里面。</p>
 
 <label>导出范围（最近多少天）</label>
 <input id="exp_days" value="30">
 
-<button id="exp_tickets">导出工单列表</button>
 <button id="exp_calls" style="background:#1a5fb4">导出通话记录</button>
 <div id="exp_result"></div>
 
@@ -255,16 +201,15 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       });
       const data = await resp.json();
       box.style.display = "block";
-      if (resp.ok && data.ticket_id) {
-        const link = "http://" + location.hostname + ":8899/#ticket/zoom/" + data.ticket_id;
+      if (resp.ok && data.record_id) {
+        const link = "/records/" + data.record_id;
         box.className = "ok";
-        box.innerHTML = "模拟来电完成，工单已生成（编号 " + data.ticket_id +
-          "）。<br><a href='" + link + "' target='_blank'>点这里打开这张工单</a>" +
-          "<br>录音已作为附件绑在工单上：" + (data.recording_attached ? "是" : "否");
+        box.innerHTML = "模拟来电完成，记录已生成（编号 " + data.record_id +
+          "）。<br><a href='" + link + "' target='_blank'>点这里打开这条记录</a>" +
+          "<br>录音已绑在这条记录上：" + (data.has_recording ? "是" : "否");
       } else {
         box.className = "err";
-        box.textContent = "没有生成工单：" + JSON.stringify(data) +
-          "（括号里 zammad_error 就是客服系统返回的具体原因）";
+        box.textContent = "没有生成记录：" + JSON.stringify(data);
       }
     } catch (e) {
       box.style.display = "block"; box.className = "err";
@@ -290,14 +235,14 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       });
       const data = await resp.json();
       box.style.display = "block";
-      if (resp.ok && data.ticket_id) {
-        const link = "http://" + location.hostname + ":8899/#ticket/zoom/" + data.ticket_id;
+      if (resp.ok && data.record_id) {
+        const link = "/records/" + data.record_id;
         box.className = "ok";
-        box.innerHTML = "语音留言工单已生成（编号 " + data.ticket_id +
-          "）。<br><a href='" + link + "' target='_blank'>点这里打开这张留言工单</a>";
+        box.innerHTML = "语音留言记录已生成（编号 " + data.record_id +
+          "）。<br><a href='" + link + "' target='_blank'>点这里打开这条留言记录</a>";
       } else {
         box.className = "err";
-        box.textContent = "没有生成留言工单：" + JSON.stringify(data);
+        box.textContent = "没有生成留言记录：" + JSON.stringify(data);
       }
     } catch (e) {
       box.style.display = "block"; box.className = "err";
@@ -330,10 +275,8 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       box.textContent = "导出失败：" + e + "（常见原因：密钥不对）";
     }
   }
-  document.getElementById("exp_tickets").addEventListener("click",
-    () => downloadXlsx("/export/tickets.xlsx", "tickets.xlsx"));
   document.getElementById("exp_calls").addEventListener("click",
-    () => downloadXlsx("/export/calls.xlsx", "calls.xlsx"));
+    () => downloadXlsx("/export/calls.xlsx", "records.xlsx"));
 </script>
 </body>
 </html>
@@ -351,14 +294,14 @@ async def simulate(request: Request, x_bridge_secret: str | None = Header(defaul
     """Trial helper: one fake answered call, end to end, no real phone line.
 
     Creates a 1-second silent WAV in the recordings dir, pushes newCall +
-    answer events (the answer opens the ticket immediately, so the agent
-    could take notes during the call), then posts a CDR that attaches the
-    recording to that same ticket. Safe to run repeatedly (unique call id
+    answer events (the answer opens the record immediately, so the agent
+    could take notes during the call), then posts a CDR that binds the
+    recording to that same record. Safe to run repeatedly (unique call id
     each run).
 
     The call carries NO pre-classification (real calls arrive plain; the
-    agent classifies the ticket in Zammad afterwards), so the ticket lands
-    in 客服组 with no 工单类型 stamped. Optional JSON body:
+    agent fills in the service type on the record afterwards), so the
+    record carries no 服务类型 yet. Optional JSON body:
     {"caller_id_number": "138..."} (an "ivr_choice" override is still
     accepted for future IVR tests, but the test page no longer sends one).
     """
@@ -402,8 +345,8 @@ async def simulate_voicemail(request: Request, x_bridge_secret: str | None = Hea
     """Trial helper: one fake voicemail, end to end, no real phone line.
 
     Writes a 3-second silent WAV as the "message", then feeds the
-    voicemail ingest path so a 语音留言 ticket with the recording
-    attached should appear in 客服组."""
+    voicemail ingest path so a 语音留言 record with the recording
+    bound should appear in the record list."""
     check_secret(x_bridge_secret)
     import struct
     import time
@@ -435,128 +378,14 @@ async def simulate_voicemail(request: Request, x_bridge_secret: str | None = Hea
         "start_epoch": int(time.time()), "recording_path": filename})
 
 
-AGENTS_PAGE_HTML = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<title>新建客服坐席 - 自行车客服系统</title>
-<style>
-  body { font-family: sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
-  label { display: block; margin-top: 16px; font-weight: bold; }
-  input { width: 100%; padding: 10px; margin-top: 6px; font-size: 16px; box-sizing: border-box; }
-  button { width: 100%; padding: 14px; margin-top: 24px; font-size: 17px; color: #fff;
-           background: #1a7a4a; border: 0; border-radius: 8px; cursor: pointer; }
-  button:disabled { background: #999; }
-  .hint { color: #666; font-size: 13px; line-height: 1.6; }
-  #result { display: none; margin-top: 20px; padding: 14px; border-radius: 8px; font-size: 15px; }
-  #result.ok { display: block; background: #e6f4ea; }
-  #result.err { display: block; background: #fce8e6; }
-</style>
-</head>
-<body>
-<h1>新建客服坐席</h1>
-<p class="hint">只需要账号和密码：新账号就是客服坐席角色、客服组成员，建好就能在客服系统
-（端口 8899 的页面）用这个账号和密码直接登录。姓、名不用分开填，账号就是名字。</p>
-
-<label>账号（用户名）</label>
-<input id="login" placeholder="比如：zhangsan">
-
-<label>密码</label>
-<input id="password" type="password" placeholder="建议 8 位以上">
-
-<label>确认密码</label>
-<input id="confirm" type="password" placeholder="再输一次密码">
-
-<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
-<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
-
-<button id="go">创建坐席账号</button>
-<div id="result"></div>
-
-<script>
-  const params = new URLSearchParams(location.search);
-  const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
-  if (saved) document.getElementById("secret").value = saved;
-  document.getElementById("go").addEventListener("click", async () => {
-    const btn = document.getElementById("go");
-    const box = document.getElementById("result");
-    const login = document.getElementById("login").value.trim();
-    const password = document.getElementById("password").value;
-    const confirm = document.getElementById("confirm").value;
-    const secret = document.getElementById("secret").value.trim();
-    localStorage.setItem("bridge_secret", secret);
-    if (!login || !password) {
-      box.style.display = "block"; box.className = "err";
-      box.textContent = "账号和密码都要填。";
-      return;
-    }
-    if (password !== confirm) {
-      box.style.display = "block"; box.className = "err";
-      box.textContent = "两次密码不一致，请重新输入。";
-      return;
-    }
-    btn.disabled = true; btn.textContent = "正在创建...";
-    box.style.display = "none";
-    try {
-      const resp = await fetch("/agents", {
-        method: "POST",
-        headers: {"Content-Type": "application/json", "X-Bridge-Secret": secret},
-        body: JSON.stringify({login: login, password: password})
-      });
-      const data = await resp.json();
-      box.style.display = "block";
-      if (resp.ok && data.ok) {
-        box.className = "ok";
-        box.textContent = "已创建客服坐席：" + data.login +
-          "，请用这个账号和密码登录客服系统（端口 8899）。";
-      } else {
-        box.className = "err";
-        box.textContent = "创建失败：" +
-          (data.error === "exists" ? "这个账号已经存在，换一个账号再试。"
-                                   : (data.error || JSON.stringify(data)));
-      }
-    } catch (e) {
-      box.style.display = "block"; box.className = "err";
-      box.textContent = "请求失败：" + e;
-    }
-    btn.disabled = false; btn.textContent = "创建坐席账号";
-  });
-</script>
-</body></html>
-"""
-
-
-@app.get("/agents", response_class=HTMLResponse)
-def agents_page():
-    """Simple agent-account creation page: login + password only."""
-    return AGENTS_PAGE_HTML
-
-
-@app.post("/agents")
-async def create_agent_account(request: Request, x_bridge_secret: str | None = Header(default=None)):
-    """Create an agent account from just a login + password (secret-protected)."""
-    check_secret(x_bridge_secret)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    login = str((body or {}).get("login") or "").strip()
-    password = str((body or {}).get("password") or "")
-    if not login or not password:
-        return {"ok": False, "error": "login and password are required"}
-    user_id, err = bridge.zammad.create_agent(login, password)
-    if user_id is None:
-        return {"ok": False, "error": "账号已存在" if err == "exists" else err}
-    return {"ok": True, "login": login, "user_id": user_id}
-
-
-# --- agent board: a ticket pops open by itself, not a list badge --------
-# Why this page exists: Zammad itself never opens a ticket on its own -
-# a new ticket only shows up as a dot on an overview list, and the agent
-# has to notice the dot and click through. During a live call that is
-# too slow. So agents keep this board open: it polls the bridge, and the
-# moment a new ticket is created it navigates THIS tab straight to the
-# Zammad ticket (self-navigation is not blocked by popup blockers).
-# After finishing the ticket, the agent returns to the board bookmark;
-# the next call then pops open the same way.
+# --- agent board: a record pops open by itself, not a list badge --------
+# Why this page exists: a record list never opens itself - a new record
+# only shows up as a new row, and the agent has to notice it and click
+# through. During a live call that is too slow. So agents keep this board
+# open: it polls the bridge, and the moment a new record is created it
+# navigates THIS tab straight to the record detail (self-navigation is
+# not blocked by popup blockers). After finishing the record, the agent
+# returns to the board bookmark; the next call then pops open the same way.
 BOARD_PAGE_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -583,8 +412,8 @@ BOARD_PAGE_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <h1>坐席来电看板</h1>
-<p class="hint">上班时打开这个页面并点“开始值班”，来电时页面会自动跳到新工单，不用盯着待办列表的小点。
-工单打开后这个标签页就变成工单页了，处理完请点收藏夹回到看板，下一通电话继续自动弹。</p>
+<p class="hint">上班时打开这个页面并点“开始值班”，来电时页面会自动跳到新记录，不用盯着列表等。
+记录打开后这个标签页就变成记录页了，处理完请点收藏夹回到看板，下一通电话继续自动弹。</p>
 
 <label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
 <input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
@@ -608,7 +437,7 @@ BOARD_PAGE_HTML = """<!DOCTYPE html>
 
 <h2 style="font-size:16px;margin-top:28px;">我的接单统计与历史</h2>
 <p class="hint">这里是你自己接过的电话和分给你的留言：今日接听、累计接听、分派留言数，
-下面是最近 50 条记录（点工单号可打开原工单）。</p>
+下面是最近 50 条记录（点记录号可打开原记录）。</p>
 <div id="myStats" style="margin-top:12px;font-size:14px;line-height:1.9;"></div>
 <div id="myHistory" style="margin-top:12px;font-size:14px;line-height:1.9;"></div>
 
@@ -618,8 +447,8 @@ const params = new URLSearchParams(location.search);
 const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
 if (saved) document.getElementById("secret").value = saved;
 
-function zammadTicketUrl(id) {
-  return location.protocol + "//" + location.hostname + ":8899/#ticket/zoom/" + id;
+function recordUrl(id) {
+  return "/records/" + id;
 }
 function beep() {
   try {
@@ -642,21 +471,21 @@ async function poll() {
   }
   if (!resp.ok) return;
   const data = await resp.json();
-  const rows = data.tickets || [];
+  const rows = data.records || [];
   document.getElementById("recent").innerHTML = rows.map(r =>
-    "<div>" + r.created_at + " 来电 " + r.caller +
-    " <a target='_blank' href='" + zammadTicketUrl(r.ticket_id) + "'>工单 #" + r.ticket_id + "</a></div>"
-  ).join("") || "暂无工单。";
+    "<div>" + r.created_at + " " + (r.kind || "电话") + " " + r.caller +
+    " <a target='_blank' href='" + recordUrl(r.rowid) + "'>记录 #" + r.rowid + "</a></div>"
+  ).join("") || "暂无记录。";
   if (!rows.length) return;
   const newest = rows[0];
   if (newest.rowid > baseline) {
     baseline = newest.rowid;
     const box = document.getElementById("alert");
     box.style.display = "block";
-    box.textContent = "新来电 " + newest.caller + "，正在打开工单 #" + newest.ticket_id + "…";
-    document.getElementById("status").textContent = "新来电，正在打开工单…";
+    box.textContent = "新来电 " + newest.caller + "，正在打开记录 #" + newest.rowid + "…";
+    document.getElementById("status").textContent = "新来电，正在打开记录…";
     beep();
-    setTimeout(() => { location.href = zammadTicketUrl(newest.ticket_id); }, 2000);
+    setTimeout(() => { location.href = recordUrl(newest.rowid); }, 2000);
   }
 }
 const seatSel = document.getElementById("seat");
@@ -697,8 +526,8 @@ async function refreshHistory() {
   const rows = data.history || [];
   document.getElementById("myHistory").innerHTML = rows.map(r =>
     "<div>" + (r.time || "") + " " + r.kind + " " + r.caller + " " + (r.duration || "") +
-    (r.ticket_id ? " <a target='_blank' href='" + zammadTicketUrl(r.ticket_id) +
-      "'>工单 #" + r.ticket_id + "</a>" : "") + "</div>"
+    (r.record_id ? " <a target='_blank' href='" + recordUrl(r.record_id) +
+      "'>记录 #" + r.record_id + "</a>" : "") + "</div>"
   ).join("") || "暂无记录。";
 }
 document.getElementById("busyBtn").onclick = async () => {
@@ -722,7 +551,7 @@ document.getElementById("go").onclick = async () => {
   const resp = await fetch("/board/feed", { headers: { "X-Bridge-Secret": secret } });
   if (resp.ok) {
     const data = await resp.json();
-    const rows = data.tickets || [];
+    const rows = data.records || [];
     baseline = rows.length ? rows[0].rowid : 0;
   }
   watching = true;
@@ -741,15 +570,15 @@ document.getElementById("go").onclick = async () => {
 
 @app.get("/board", response_class=HTMLResponse)
 def board_page():
-    """Agent board: keep open on shift; new tickets open themselves."""
+    """Agent board: keep open on shift; new records open themselves."""
     return BOARD_PAGE_HTML
 
 
 @app.get("/board/feed")
 def board_feed(x_bridge_secret: str | None = Header(default=None)):
-    """Newest ticketed calls, newest first (secret-protected)."""
+    """Newest customer records, newest first (secret-protected)."""
     check_secret(x_bridge_secret)
-    return {"tickets": bridge.store.recent_tickets(20)}
+    return {"records": bridge.store.recent_records(20)}
 
 
 @app.get("/agents/status")
@@ -788,3 +617,315 @@ async def agents_busy(request: Request, x_bridge_secret: str | None = Header(def
     if not ok:
         raise HTTPException(status_code=502, detail=status)
     return {"ok": True, "agent": agent, "status": status}
+
+
+# ------------------------------------------------------------------ records
+# The record system itself: list, detail, notes, audio. No workflow,
+# no states, no dispatch queue - a record is one row per contact.
+
+RECORDS_PAGE_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>通话记录 - 自行车客服系统</title>
+<style>
+  body { font-family: sans-serif; margin: 24px auto; max-width: 760px; padding: 0 16px; color: #222; }
+  h1 { font-size: 20px; }
+  label { display: block; margin: 10px 0 4px; font-size: 14px; }
+  input, select { width: 100%; padding: 9px; font-size: 15px; box-sizing: border-box; }
+  button { margin-top: 16px; padding: 11px 18px; font-size: 15px;
+           background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+  button:disabled { background: #999; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .hint { color: #666; font-size: 13px; line-height: 1.6; }
+  #list { margin-top: 20px; font-size: 14px; line-height: 1.9; }
+  #list a { color: #0e7a5f; }
+  #pager { margin-top: 16px; }
+  #pager button { background: #1a5fb4; margin-right: 10px; }
+  #msg { margin-top: 14px; font-size: 14px; color: #666; }
+</style>
+</head>
+<body>
+<h1>通话记录</h1>
+<p class="hint">这是全部通话记录：电话、未接、留言都在这里。点一条打开详情，
+可以听录音、补填客户问的什么问题。坐席值班弹屏请用 <a href="/board">来电看板</a>。</p>
+
+<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
+<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
+
+<div class="row">
+<div><label>客户电话（模糊搜）</label><input id="caller" placeholder="比如 138"></div>
+<div><label>坐席</label><select id="agent">
+  <option value="">全部坐席</option>
+  <option value="8001">8001</option>
+  <option value="8002">8002</option>
+  <option value="8003">8003</option>
+</select></div>
+<div><label>类型</label><select id="kind">
+  <option value="">全部类型</option>
+  <option value="电话">电话</option>
+  <option value="未接">未接</option>
+  <option value="留言">留言</option>
+</select></div>
+<div><label>导出范围（最近多少天）</label><input id="exp_days" value="30"></div>
+<div><label>开始日期</label><input id="date_from" type="date"></div>
+<div><label>结束日期</label><input id="date_to" type="date"></div>
+</div>
+
+<button id="search">搜索</button>
+<button id="export" style="background:#1a5fb4">导出 Excel</button>
+<div id="msg"></div>
+<div id="list"></div>
+<div id="pager">
+  <button id="prev">上一页</button>
+  <button id="next">下一页</button>
+  <span id="pageInfo" style="font-size:14px;"></span>
+</div>
+
+<script>
+let offset = 0;
+const LIMIT = 50;
+const params = new URLSearchParams(location.search);
+const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
+if (saved) document.getElementById("secret").value = saved;
+
+function query() {
+  const q = new URLSearchParams();
+  const v = id => document.getElementById(id).value.trim();
+  if (v("caller")) q.set("caller", v("caller"));
+  if (v("agent")) q.set("agent", v("agent"));
+  if (v("kind")) q.set("kind", v("kind"));
+  if (v("date_from")) q.set("date_from", v("date_from"));
+  if (v("date_to")) q.set("date_to", v("date_to"));
+  q.set("limit", LIMIT); q.set("offset", offset);
+  return q.toString();
+}
+async function load() {
+  const secret = document.getElementById("secret").value.trim();
+  localStorage.setItem("bridge_secret", secret);
+  const msg = document.getElementById("msg");
+  const list = document.getElementById("list");
+  msg.textContent = "正在查...";
+  let resp;
+  try {
+    resp = await fetch("/records/feed?" + query(), { headers: { "X-Bridge-Secret": secret } });
+  } catch (e) { msg.textContent = "请求失败：" + e; return; }
+  if (resp.status === 401) { msg.textContent = "密钥不对，请重新粘贴访问密钥。"; list.innerHTML = ""; return; }
+  if (!resp.ok) { msg.textContent = "查询失败：HTTP " + resp.status; return; }
+  const data = await resp.json();
+  const rows = data.records || [];
+  msg.textContent = rows.length ? "共 " + rows.length + " 条（本页）" : "没有符合条件的记录。";
+  document.getElementById("pageInfo").textContent = "第 " + (offset / LIMIT + 1) + " 页";
+  document.getElementById("prev").disabled = offset === 0;
+  document.getElementById("next").disabled = rows.length < LIMIT;
+  list.innerHTML = rows.map(r =>
+    "<div>" + (r.time || "") + " " + r.kind + " " + r.caller +
+    "（" + (r.agent || "未分派") + "，" + (r.duration || "") + "）" +
+    (r.service_type ? " " + r.service_type : "") +
+    (r.question ? " " + r.question.slice(0, 30) : "") +
+    " <a target='_blank' href='/records/" + r.record_id + "'>记录 #" + r.record_id + "</a></div>"
+  ).join("");
+}
+document.getElementById("search").onclick = () => { offset = 0; load(); };
+document.getElementById("prev").onclick = () => { offset = Math.max(0, offset - LIMIT); load(); };
+document.getElementById("next").onclick = () => { offset += LIMIT; load(); };
+document.getElementById("export").onclick = async () => {
+  const secret = document.getElementById("secret").value.trim();
+  localStorage.setItem("bridge_secret", secret);
+  const days = document.getElementById("exp_days").value.trim() || "30";
+  const msg = document.getElementById("msg");
+  try {
+    const resp = await fetch("/export/calls.xlsx?days=" + encodeURIComponent(days), {
+      headers: { "X-Bridge-Secret": secret }
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const blob = await resp.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "records.xlsx";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    msg.textContent = "导出成功，文件已开始下载。";
+  } catch (e) {
+    msg.textContent = "导出失败：" + e + "（常见原因：密钥不对）";
+  }
+};
+load();
+</script>
+</body>
+</html>
+"""
+
+SERVICE_TYPE_OPTIONS = ["", "还车异常", "借车异常", "锁桩故障", "车辆损坏",
+                        "掉链", "乱停放", "扣费退款", "其他"]
+
+
+def record_detail_page(rec: dict, history_hint: str) -> str:
+    """Server-rendered record detail: fields, audio player, notes form."""
+    esc = html.escape
+    channel = {"电话": "热线电话", "留言": "语音留言",
+               "未接": "热线电话（未接）"}.get(rec["kind"], "热线电话")
+    if rec["has_recording"]:
+        audio = (f'<audio controls src="/records/{rec["record_id"]}/recording" '
+                 'style="width:100%;"></audio>')
+    else:
+        audio = "无录音"
+    options = ""
+    for opt in SERVICE_TYPE_OPTIONS:
+        sel = " selected" if opt == rec["service_type"] else ""
+        options += f'<option value="{esc(opt)}"{sel}>{esc(opt) or "（未填）"}</option>'
+    hint = (f'<p class="hint" style="color:#555;">历史提示：{esc(history_hint)}</p>'
+            if history_hint else "")
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记录 #{rec["record_id"]} - 自行车客服系统</title>
+<style>
+  body {{ font-family: sans-serif; margin: 24px auto; max-width: 560px; padding: 0 16px; color: #222; }}
+  h1 {{ font-size: 20px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 15px; }}
+  td {{ padding: 8px 6px; border-bottom: 1px solid #eee; vertical-align: top; }}
+  td:first-child {{ color: #666; width: 96px; }}
+  label {{ display: block; margin: 14px 0 6px; font-size: 14px; }}
+  input, select, textarea {{ width: 100%; padding: 9px; font-size: 15px; box-sizing: border-box; }}
+  button {{ margin-top: 20px; width: 100%; padding: 12px; font-size: 16px;
+           background: #0e7a5f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }}
+  button:disabled {{ background: #999; }}
+  .hint {{ color: #666; font-size: 13px; line-height: 1.6; }}
+  #result {{ display: none; margin-top: 16px; padding: 12px; border-radius: 6px; font-size: 14px; }}
+  #result.ok {{ display: block; background: #e6f4ea; }}
+  #result.err {{ display: block; background: #fdecea; }}
+</style>
+</head>
+<body>
+<h1>通话记录 #{rec["record_id"]}</h1>
+<p><a href="/records">← 返回记录列表</a></p>
+<table>
+<tr><td>登记时间</td><td>{esc(rec["time"] or rec["created_at"])}</td></tr>
+<tr><td>联系电话</td><td>{esc(rec["caller"])}</td></tr>
+<tr><td>客服人员</td><td>{esc(rec["agent"] or rec["owner_seat"])}</td></tr>
+<tr><td>通话时长</td><td>{esc(rec["duration"])}</td></tr>
+<tr><td>服务途径</td><td>{esc(channel)}</td></tr>
+<tr><td>服务类型</td><td>{esc(rec["service_type"]) or "（未填）"}</td></tr>
+<tr><td>通话内容</td><td>{esc(rec["question"]) or "（未填）"}</td></tr>
+<tr><td>录音文件</td><td>{audio}</td></tr>
+<tr><td>通话ID</td><td>{esc(rec["call_id"])}</td></tr>
+</table>
+{hint}
+<h2 style="font-size:16px;margin-top:28px;">补填：客户问的什么问题</h2>
+<p class="hint">通话中或通话后在这里补填，保存后这条记录就完整了。</p>
+<label>服务类型</label>
+<select id="stype">{options}</select>
+<label>通话内容（客户问的什么问题）</label>
+<textarea id="question" rows="4">{esc(rec["question"])}</textarea>
+<label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
+<input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
+<button id="save">保存</button>
+<div id="result"></div>
+<script>
+  const saved = localStorage.getItem("bridge_secret") || "";
+  if (saved) document.getElementById("secret").value = saved;
+  document.getElementById("save").addEventListener("click", async () => {{
+    const btn = document.getElementById("save");
+    const box = document.getElementById("result");
+    const secret = document.getElementById("secret").value.trim();
+    localStorage.setItem("bridge_secret", secret);
+    btn.disabled = true; btn.textContent = "正在保存...";
+    box.style.display = "none";
+    try {{
+      const resp = await fetch("/records/{rec["record_id"]}/notes", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json", "X-Bridge-Secret": secret}},
+        body: JSON.stringify({{
+          question: document.getElementById("question").value,
+          service_type: document.getElementById("stype").value
+        }})
+      }});
+      const data = await resp.json();
+      box.style.display = "block";
+      if (resp.ok && data.ok) {{
+        box.className = "ok";
+        box.textContent = "已保存。";
+        setTimeout(() => location.reload(), 600);
+      }} else {{
+        box.className = "err";
+        box.textContent = "保存失败：" + JSON.stringify(data);
+      }}
+    }} catch (e) {{
+      box.style.display = "block"; box.className = "err";
+      box.textContent = "请求失败：" + e;
+    }}
+    btn.disabled = false; btn.textContent = "保存";
+  }});
+</script>
+</body>
+</html>"""
+
+
+@app.get("/records", response_class=HTMLResponse)
+def records_page():
+    """Record list page: search + browse all call records."""
+    return RECORDS_PAGE_HTML
+
+
+@app.get("/records/feed")
+def records_feed(caller: str = "", agent: str = "", kind: str = "",
+                 date_from: str = "", date_to: str = "",
+                 limit: int = 50, offset: int = 0,
+                 x_bridge_secret: str | None = Header(default=None)):
+    """Record rows as JSON, newest first (secret-protected).
+    Filters: caller substring, agent seat, kind 电话/未接/留言,
+    date_from/date_to as YYYY-MM-DD (Asia/Shanghai)."""
+    check_secret(x_bridge_secret)
+    return {"records": bridge.store.list_records(
+        caller, agent, kind, date_from, date_to, limit, offset)}
+
+
+@app.get("/records/{record_id}", response_class=HTMLResponse)
+def record_page(record_id: int):
+    """One record's detail: fields, recording player, notes form."""
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    try:
+        hint = summarize_call_history(
+            bridge.store.calls_for_caller(rec["caller"], rec["call_id"]))
+    except Exception:
+        hint = ""
+    return record_detail_page(rec, hint)
+
+
+@app.get("/records/{record_id}/recording")
+def record_recording(record_id: int):
+    """The record's recording audio (from the shared recordings volume)."""
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    path = find_recording_file(rec["recording_file"])
+    if not path:
+        raise HTTPException(status_code=404, detail="no recording file")
+    with open(path, "rb") as f:
+        data = f.read()
+    return Response(content=data, media_type="audio/wav",
+                    headers={"Content-Disposition": f"inline; filename={record_id}.wav"})
+
+
+@app.post("/records/{record_id}/notes")
+async def record_notes(record_id: int, request: Request,
+                       x_bridge_secret: str | None = Header(default=None)):
+    """Agent fills in the question + service type (secret-protected)."""
+    check_secret(x_bridge_secret)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ok = bridge.store.set_notes(
+        record_id,
+        str((body or {}).get("question") or ""),
+        str((body or {}).get("service_type") or ""))
+    if not ok:
+        raise HTTPException(status_code=404, detail="record not found")
+    return {"ok": True, "record_id": record_id}

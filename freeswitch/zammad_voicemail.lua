@@ -1,9 +1,9 @@
 -- zammad_voicemail.lua
 -- Hangup hook for the voicemail extension: posts the finished message
--- to the bridge so it becomes a voicemail ticket (type=voicemail,
--- group=customer-service group). Runs via api_hangup_hook, so the
--- session carries the finished call's variables (billsec, duration,
--- start_epoch). Same mod_curl POST pattern as zammad_bridge.lua.
+-- to the bridge so it becomes a voicemail record (kind=留言）.
+-- Runs via api_hangup_hook, so the session carries the finished call's
+-- variables (billsec, duration, start_epoch). Same mod_curl POST pattern
+-- as zammad_bridge.lua.
 -- The recording file is ${uuid}.wav in the shared /recordings volume.
 
 local voicemail_url = session and session:getVariable("voicemail_url")

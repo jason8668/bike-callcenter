@@ -13,7 +13,7 @@ if session then
   local api = freeswitch.API()
   local result = api:executeString("callcenter_config",
     "agent set status " .. tostring(agent) .. " '" .. target .. "'")
-  freeswitch.consoleLog("INFO", "zammad_agent_status agent=" ..
+  freeswitch.consoleLog("INFO", "bridge_agent_status agent=" ..
     tostring(agent) .. " target=" .. target ..
     " result=" .. tostring(result) .. "\n")
 end
