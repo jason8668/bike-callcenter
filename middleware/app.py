@@ -916,7 +916,7 @@ function renderDatePicker() {
     var cls = "dp-day";
     if (iso === sel) cls += " on";
     if (new Date(s.y, s.m, day).getTime() === today.getTime()) cls += " today";
-    html += '<button type="button" class="' + cls + '" onclick="pickerPick(\'' + iso + '\')">' + day + "</button>";
+    html += '<button type="button" class="' + cls + '" onclick="pickerPick(\\'' + iso + '\\')">' + day + "</button>";
   }
   html += '</div><div class="dp-foot"><button type="button" onclick="pickerClear()">清除</button>' +
     '<button type="button" onclick="pickerToday()">今天</button></div>';
@@ -1036,7 +1036,7 @@ async function openRecord(id) {
     '<div id="cardMsg" style="color:var(--muted);font-size:13px;margin-top:4px"></div>' +
     "<label>用户标签</label>" +
     '<div id="tagChips"></div>' +
-    '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\'Enter\'){addTag();}">' +
+    '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}">' +
     '<button class="btn btn-sm" onclick="addTag()">添加</button></div>' +
     '<div id="tagSuggest"></div></div>' +
     '<div class="meta-grid">' +
