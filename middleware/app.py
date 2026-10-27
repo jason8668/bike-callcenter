@@ -589,6 +589,32 @@ border-radius:16px;padding:14px 16px;margin:14px 0}
 .meta-item b{font-size:14px;font-weight:600}
 .meta-item .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
 .meta-wide{grid-column:1 / -1}
+.date-field{position:relative}
+.search .date-field{flex:1;min-width:110px}
+.date-field input{width:100%;padding-right:28px;cursor:pointer}
+.date-chev{position:absolute;right:12px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none;font-size:12px}
+.date-picker{position:fixed;z-index:50;width:300px;background:rgba(255,255,255,.78);
+backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);
+border:1px solid rgba(255,255,255,.65);box-shadow:0 12px 32px rgba(0,0,0,.18);
+border-radius:20px;padding:14px 14px 10px}
+.dp-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.dp-head span{font-size:16px;font-weight:600}
+.dp-head button{width:30px;height:30px;border-radius:50%;border:0;background:rgba(120,120,128,.12);
+font-size:18px;line-height:1;cursor:pointer;font-family:inherit}
+.dp-week,.dp-grid{display:grid;grid-template-columns:repeat(7,1fr);text-align:center}
+.dp-week span{color:var(--muted);font-size:12px;padding:4px 0}
+.dp-day{aspect-ratio:1;border:0;background:transparent;border-radius:50%;cursor:pointer;font-size:14px;font-family:inherit}
+.dp-day:hover{background:rgba(0,122,255,.12)}
+.dp-day.today{box-shadow:inset 0 0 0 1.5px #007aff;color:#007aff;font-weight:600}
+.dp-day.on{background:#007aff;color:#fff;font-weight:600}
+.dp-foot{display:flex;justify-content:space-between;margin-top:10px}
+.dp-foot button{border:0;background:transparent;color:#007aff;font-size:14px;cursor:pointer;padding:6px 8px;font-family:inherit}
+.audio-player{display:flex;align-items:center;gap:12px}
+.audio-btn{width:38px;height:38px;border-radius:50%;border:0;background:#007aff;color:#fff;
+font-size:14px;cursor:pointer;flex-shrink:0;box-shadow:0 4px 12px rgba(0,122,255,.35)}
+.audio-track{flex:1;height:6px;border-radius:3px;background:rgba(120,120,128,.2);cursor:pointer;overflow:hidden}
+.audio-fill{height:100%;width:0;background:#007aff;border-radius:3px}
+.audio-time{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 """
 
 
@@ -688,9 +714,9 @@ def desk_page_html(seat: str) -> str:
           <button type="button" data-kind="留言">留言</button>
         </div>
         <input type="hidden" id="fKind" value="">
-        <input id="fDate" type="date">
+        <div class="date-field"><input id="fDate" type="text" placeholder="按日期筛选" readonly onclick="openDatePicker(this)"><span class="date-chev">▾</span></div>
         <button class="btn btn-sm" onclick="searchList()">搜索</button>
-        <input id="fDays" type="number" value="30" min="1" max="365" title="导出天数">
+        <input id="fDays" type="text" inputmode="numeric" value="30" title="导出天数">
         <button class="btn btn-sm btn-ghost" onclick="exportXlsx()">导出 Excel</button>
       </div>
       <div id="list"><div class="empty">加载中…</div></div>
@@ -719,7 +745,7 @@ def desk_page_html(seat: str) -> str:
         </div>
         <div id="customRange" style="display:none;margin-top:10px">
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="date" id="statFrom"><span>至</span><input type="date" id="statTo">
+            <div class="date-field" style="flex:1"><input type="text" id="statFrom" placeholder="开始日期" readonly onclick="openDatePicker(this)"><span class="date-chev">▾</span></div><span>至</span><div class="date-field" style="flex:1"><input type="text" id="statTo" placeholder="结束日期" readonly onclick="openDatePicker(this)"><span class="date-chev">▾</span></div>
             <button class="btn btn-sm" onclick="applyStatRange()">应用</button>
           </div>
         </div>
@@ -733,6 +759,7 @@ def desk_page_html(seat: str) -> str:
     </div>
   </div>
 </div>
+<div id="datePicker" class="date-picker" style="display:none"></div>
 <script>
 var baseline = 0, currentId = null, offset = 0;
 var SERVICE_TYPES = ["还车异常", "借车异常", "锁桩故障", "车辆损坏", "掉链", "乱停放", "扣费退款", "其他"];
@@ -824,11 +851,112 @@ function changePage(step) {
   refreshList();
 }
 function exportXlsx() {
-  var days = parseInt($("fDays").value || "30", 10);
+  var days = parseInt($("fDays").value, 10);
+  if (!days || days < 1) days = 30;
+  if (days > 365) days = 365;
   location.href = "/desk/export.xlsx?days=" + days;
+}
+var pickerState = null, audioObj = null;
+function openDatePicker(input) {
+  if (pickerState && pickerState.input === input) { closeDatePicker(); return; }
+  var val = input.value;
+  var d = val ? new Date(val + "T00:00:00") : new Date();
+  pickerState = { input: input, y: d.getFullYear(), m: d.getMonth() };
+  renderDatePicker();
+}
+function renderDatePicker() {
+  var s = pickerState;
+  var first = new Date(s.y, s.m, 1);
+  var startDay = first.getDay();
+  var daysInMonth = new Date(s.y, s.m + 1, 0).getDate();
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var sel = s.input.value;
+  var html = '<div class="dp-head"><button type="button" onclick="pickerNav(-1)">‹</button>' +
+    "<span>" + s.y + "年" + (s.m + 1) + "月</span>" +
+    '<button type="button" onclick="pickerNav(1)">›</button></div>' +
+    '<div class="dp-week"><span>日</span><span>一</span><span>二</span><span>三</span>' +
+    '<span>四</span><span>五</span><span>六</span></div><div class="dp-grid">';
+  for (var i = 0; i < startDay; i++) html += "<span></span>";
+  for (var day = 1; day <= daysInMonth; day++) {
+    var iso = s.y + "-" + String(s.m + 1).padStart(2, "0") + "-" + String(day).padStart(2, "0");
+    var cls = "dp-day";
+    if (iso === sel) cls += " on";
+    if (new Date(s.y, s.m, day).getTime() === today.getTime()) cls += " today";
+    html += '<button type="button" class="' + cls + '" onclick="pickerPick(\'' + iso + '\')">' + day + "</button>";
+  }
+  html += '</div><div class="dp-foot"><button type="button" onclick="pickerClear()">清除</button>' +
+    '<button type="button" onclick="pickerToday()">今天</button></div>';
+  var el = $("datePicker");
+  el.innerHTML = html;
+  var r = s.input.getBoundingClientRect();
+  el.style.left = Math.min(r.left, window.innerWidth - 316) + "px";
+  el.style.top = (r.bottom + 6) + "px";
+  el.style.display = "block";
+}
+function pickerNav(delta) {
+  var s = pickerState;
+  s.m += delta;
+  if (s.m < 0) { s.m = 11; s.y--; }
+  if (s.m > 11) { s.m = 0; s.y++; }
+  renderDatePicker();
+}
+function pickerPick(iso) {
+  var input = pickerState.input;
+  input.value = iso;
+  closeDatePicker();
+  if (input.id === "fDate") searchList();
+}
+function pickerClear() {
+  var input = pickerState.input;
+  input.value = "";
+  closeDatePicker();
+  if (input.id === "fDate") searchList();
+}
+function pickerToday() {
+  var t = new Date();
+  pickerPick(t.getFullYear() + "-" + String(t.getMonth() + 1).padStart(2, "0") + "-" + String(t.getDate()).padStart(2, "0"));
+}
+function closeDatePicker() {
+  pickerState = null;
+  $("datePicker").style.display = "none";
+}
+document.addEventListener("click", function(e) {
+  if (!pickerState) return;
+  if (e.target.closest && e.target.closest("#datePicker")) return;
+  if (e.target === pickerState.input) return;
+  closeDatePicker();
+});
+window.addEventListener("scroll", closeDatePicker, true);
+function fmtTime(s) {
+  s = Math.floor(s || 0);
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+function toggleAudio(btn) {
+  var src = "/desk/records/" + currentId + "/recording";
+  if (!audioObj || audioObj.src.indexOf(src) === -1) {
+    if (audioObj) audioObj.pause();
+    audioObj = new Audio(src);
+    audioObj.ontimeupdate = function() {
+      var dur = audioObj.duration || 0;
+      $("audioFill").style.width = (dur ? (audioObj.currentTime / dur * 100) : 0) + "%";
+      $("audioTime").textContent = fmtTime(audioObj.currentTime) + " / " + fmtTime(dur);
+    };
+    audioObj.onended = function() { $("audioBtn").textContent = "▶"; };
+    audioObj.onloadedmetadata = function() {
+      $("audioTime").textContent = "0:00 / " + fmtTime(audioObj.duration || 0);
+    };
+  }
+  if (audioObj.paused) { audioObj.play(); btn.textContent = "❚❚"; }
+  else { audioObj.pause(); btn.textContent = "▶"; }
+}
+function seekAudio(e) {
+  if (!audioObj || !audioObj.duration) return;
+  var rect = e.currentTarget.getBoundingClientRect();
+  audioObj.currentTime = (e.clientX - rect.left) / rect.width * audioObj.duration;
 }
 async function openRecord(id) {
   currentId = id;
+  if (audioObj) { audioObj.pause(); audioObj = null; }
   var r = await api("/desk/records/" + id);
   if (!r.ok) { $("detail").innerHTML = "<h2>记录详情</h2><div class='empty'>记录不存在</div>"; return; }
   var d = await r.json();
@@ -836,7 +964,9 @@ async function openRecord(id) {
     return '<option value="' + esc(t) + '"' + (t === d.service_type ? " selected" : "") + ">" + esc(t) + "</option>";
   }).join("");
   var audio = d.has_recording
-    ? '<audio controls src="/desk/records/' + d.record_id + '/recording"></audio>'
+    ? '<div class="audio-player"><button type="button" class="audio-btn" id="audioBtn" onclick="toggleAudio(this)">▶</button>' +
+      '<div class="audio-track" onclick="seekAudio(event)"><div class="audio-fill" id="audioFill"></div></div>' +
+      '<span class="audio-time" id="audioTime">0:00 / 0:00</span></div>'
     : '<div style="color:var(--muted)">无录音</div>';
   var hint = d.history_hint
     ? '<div class="msg msg-info">' + esc(d.history_hint) + "</div>" : "";
