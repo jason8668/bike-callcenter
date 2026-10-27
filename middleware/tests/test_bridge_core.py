@@ -451,6 +451,63 @@ class TestRangeStats(unittest.TestCase):
         self.assertEqual(len(h), 2)  # one old call + one old voicemail
 
 
+class TestCallerCardsTags(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bridge = make_bridge(self.tmp)
+
+    def _call(self, uuid, caller, start="1792800000"):
+        self.bridge.handle_cdr({**CDR, "uuid": uuid,
+                                "caller_id_number": caller,
+                                "start_epoch": start})
+        return self.bridge.store.get_record_rowid(uuid)
+
+    def test_card_auto_carry_and_update(self):
+        r1 = self._call("card-1", "13800000001")
+        self.assertEqual(self.bridge.store.get_record(r1)["card"], "")
+        self.assertTrue(self.bridge.store.set_record_card(r1, "K1001"))
+        self.assertEqual(self.bridge.store.get_caller_card("13800000001"), "K1001")
+        r2 = self._call("card-2", "13800000001", start="1792800100")
+        self.assertEqual(self.bridge.store.get_record(r2)["card"], "K1001")
+        # Clearing drops the association.
+        self.assertTrue(self.bridge.store.set_record_card(r2, ""))
+        self.assertEqual(self.bridge.store.get_caller_card("13800000001"), "")
+        self.assertFalse(self.bridge.store.set_record_card(999999, "K1"))
+
+    def test_tags_and_frequent(self):
+        r1 = self._call("tag-1", "13800000002")
+        r2 = self._call("tag-2", "13800000002", start="1792800100")
+        store = self.bridge.store
+        self.assertTrue(store.add_record_tag(r1, "高频用户"))
+        self.assertTrue(store.add_record_tag(r1, "需回访"))
+        self.assertTrue(store.add_record_tag(r2, "高频用户"))
+        self.assertTrue(store.add_record_tag(r2, "自定义标签"))
+        self.assertFalse(store.add_record_tag(999999, "高频用户"))
+        self.assertFalse(store.add_record_tag(r1, "  "))
+        self.assertEqual(store.get_record_tags(r1), ["需回访", "高频用户"])
+        top = store.caller_top_tags("13800000002")
+        self.assertEqual(top[0], {"tag": "高频用户", "count": 2})
+        self.assertTrue(store.remove_record_tag(r1, "需回访"))
+        self.assertFalse(store.remove_record_tag(r1, "需回访"))
+        self.assertEqual(store.get_record_tags(r1), ["高频用户"])
+
+    def test_history_by_phone_or_card(self):
+        r1 = self._call("hist-1", "13800000003")
+        r2 = self._call("hist-2", "13800000003", start="1792800100")
+        r3 = self._call("hist-3", "13900000003", start="1792800200")
+        store = self.bridge.store
+        store.set_record_card(r1, "K2002")
+        store.set_record_card(r3, "K2002")  # same card, another number
+        rows = store.calls_for_user("13800000003", "K2002",
+                                    exclude_call_id="hist-2")
+        self.assertEqual(sorted(r["caller"] for r in rows),
+                         ["13800000003", "13900000003"])
+        self.assertEqual(len([r for r in rows if r["via_card"]]), 1)
+        hint = self.bridge.record_history_hint(r2)
+        self.assertIn("同卡号他号来电 1 次", hint)
+        self.assertEqual(store.calls_for_user("", ""), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

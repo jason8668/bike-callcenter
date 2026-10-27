@@ -281,6 +281,27 @@ class CallStore:
                 " token TEXT PRIMARY KEY, seat TEXT,"
                 " created_at INTEGER, last_seen INTEGER)"
             )
+            # Caller cards + tags (user-level, keyed by phone number):
+            # caller_cards keeps one phone's current card number, so a
+            # new record from a known phone auto-carries it; record_tags
+            # attaches tags to individual records, and per-caller tag
+            # frequency is counted from them (most-used first).
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS caller_cards ("
+                " phone TEXT PRIMARY KEY, card TEXT, updated_at INTEGER)"
+            )
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS record_tags ("
+                " record_id INTEGER, tag TEXT,"
+                " PRIMARY KEY(record_id, tag))"
+            )
+            # card_no on the record itself: the card shown for this
+            # call (auto-carried from caller_cards at creation, or set
+            # by the agent on the detail page).
+            try:
+                c.execute("ALTER TABLE calls ADD COLUMN card_no TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -466,12 +487,16 @@ class CallStore:
         keep is_record=0 and never appear in the record list. Notes
         (question/service_type) are only ever written by set_notes, so
         a late CDR can never wipe what the agent typed. Returns rowid."""
+        # New records auto-carry this phone's associated card number
+        # (set by an agent on an earlier record); the upsert below
+        # never overwrites a record's own card afterwards.
+        card_no = self.get_caller_card(rec.caller) if rec.caller else ""
         with self._conn() as c:
             c.execute(
                 "INSERT INTO calls (call_id, caller, callee, direction, answered,"
                 " duration_sec, wait_sec, start_epoch, agent, is_record, kind,"
-                " recording_path, owner_seat)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                " recording_path, owner_seat, card_no)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(call_id) DO UPDATE SET"
                 " callee=excluded.callee,"
                 " answered=excluded.answered, duration_sec=excluded.duration_sec,"
@@ -484,7 +509,8 @@ class CallStore:
                 " THEN excluded.owner_seat ELSE calls.owner_seat END",
                 (rec.call_id, rec.caller, rec.callee, rec.direction,
                  1 if rec.answered else 0, rec.duration_sec, rec.wait_sec, rec.start_epoch,
-                 rec.agent, 1 if is_record else 0, kind, rec.recording_path, owner_seat),
+                 rec.agent, 1 if is_record else 0, kind, rec.recording_path, owner_seat,
+                 card_no),
             )
             row = c.execute("SELECT rowid FROM calls WHERE call_id=?",
                             (rec.call_id,)).fetchone()
@@ -496,10 +522,14 @@ class CallStore:
             r = c.execute(
                 "SELECT rowid, call_id, caller, callee, direction, answered,"
                 " duration_sec, wait_sec, start_epoch, agent, kind,"
-                " recording_path, question, service_type, owner_seat, created_at"
+                " recording_path, question, service_type, owner_seat, created_at,"
+                " card_no"
                 " FROM calls WHERE rowid=? AND is_record=1", (rowid,)).fetchone()
         if not r:
             return None
+        # Effective card: this record's own card, else the phone's
+        # current association (older records predate the feature).
+        card = r[16] or self.get_caller_card(r[2])
         return {
             "record_id": r[0], "call_id": r[1], "caller": r[2], "callee": r[3],
             "direction": r[4], "answered": bool(r[5]),
@@ -509,6 +539,9 @@ class CallStore:
             "has_recording": bool(r[11]), "recording_file": r[11] or "",
             "question": r[12] or "", "service_type": r[13] or "",
             "owner_seat": r[14] or "", "created_at": r[15] or "",
+            "card": card or "",
+            "tags": self.get_record_tags(rowid),
+            "frequent_tags": self.caller_top_tags(r[2]),
         }
 
     def set_notes(self, rowid: int, question: str, service_type: str) -> bool:
@@ -520,6 +553,112 @@ class CallStore:
                 "WHERE rowid=? AND is_record=1",
                 (question or "", service_type or "", rowid))
             return cur.rowcount > 0
+
+    def get_caller_card(self, phone: str) -> str:
+        """This phone's current card number, or ''."""
+        if not phone:
+            return ""
+        with self._conn() as c:
+            row = c.execute("SELECT card FROM caller_cards WHERE phone=?",
+                            (phone,)).fetchone()
+        return row[0] if row else ""
+
+    def set_record_card(self, rowid: int, card: str) -> bool:
+        """Set a record's card number; a non-empty card also becomes
+        this phone's associated card (future records auto-carry it).
+        Clearing a record's card drops the phone's association too.
+        Returns False for unknown records."""
+        card = (card or "").strip()
+        with self._conn() as c:
+            row = c.execute("SELECT caller FROM calls WHERE rowid=? AND is_record=1",
+                            (rowid,)).fetchone()
+            if not row:
+                return False
+            phone = row[0] or ""
+            c.execute("UPDATE calls SET card_no=? WHERE rowid=?", (card, rowid))
+            if phone:
+                if card:
+                    c.execute(
+                        "INSERT INTO caller_cards (phone, card, updated_at)"
+                        " VALUES (?,?,?)"
+                        " ON CONFLICT(phone) DO UPDATE SET card=excluded.card,"
+                        " updated_at=excluded.updated_at",
+                        (phone, card, int(time.time())))
+                else:
+                    c.execute("DELETE FROM caller_cards WHERE phone=?", (phone,))
+        return True
+
+    def get_record_tags(self, rowid: int) -> list[str]:
+        with self._conn() as c:
+            rows = c.execute("SELECT tag FROM record_tags WHERE record_id=?"
+                             " ORDER BY tag", (rowid,)).fetchall()
+        return [r[0] for r in rows]
+
+    def add_record_tag(self, rowid: int, tag: str) -> bool:
+        """Attach a tag to a record. Returns False for unknown records
+        or empty tags."""
+        tag = (tag or "").strip()
+        if not tag:
+            return False
+        with self._conn() as c:
+            row = c.execute("SELECT 1 FROM calls WHERE rowid=? AND is_record=1",
+                            (rowid,)).fetchone()
+            if not row:
+                return False
+            c.execute("INSERT OR IGNORE INTO record_tags (record_id, tag)"
+                      " VALUES (?,?)", (rowid, tag))
+        return True
+
+    def remove_record_tag(self, rowid: int, tag: str) -> bool:
+        tag = (tag or "").strip()
+        with self._conn() as c:
+            cur = c.execute("DELETE FROM record_tags WHERE record_id=? AND tag=?",
+                            (rowid, tag))
+        return cur.rowcount > 0
+
+    def caller_top_tags(self, phone: str, limit: int = 5) -> list[dict]:
+        """This phone's most-used tags across its records, most-used
+        first (the auto-suggest source for a returning caller)."""
+        if not phone:
+            return []
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT tag, COUNT(*) FROM record_tags JOIN calls"
+                " ON record_tags.record_id = calls.rowid"
+                " WHERE calls.caller=? AND calls.is_record=1"
+                " GROUP BY tag ORDER BY COUNT(*) DESC, tag ASC LIMIT ?",
+                (phone, limit)).fetchall()
+        return [{"tag": r[0], "count": r[1]} for r in rows]
+
+    def calls_for_user(self, phone: str, card: str = "", exclude_call_id: str = "",
+                       limit: int = 10) -> list[dict]:
+        """Past records for a user, linked by phone number OR card
+        number (the same card on another number counts too), newest
+        first, excluding one call (the current one)."""
+        if not phone and not card:
+            return []
+        with self._conn() as c:
+            if card:
+                rows = c.execute(
+                    "SELECT caller, start_epoch, kind, duration_sec,"
+                    " service_type, question FROM calls"
+                    " WHERE is_record=1 AND call_id != ? AND"
+                    " (caller=? OR card_no=? OR caller IN"
+                    " (SELECT phone FROM caller_cards WHERE card=?))"
+                    " ORDER BY rowid DESC LIMIT ?",
+                    (exclude_call_id, phone, card, card, limit)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT caller, start_epoch, kind, duration_sec,"
+                    " service_type, question FROM calls"
+                    " WHERE caller=? AND call_id != ? AND is_record=1"
+                    " ORDER BY rowid DESC LIMIT ?",
+                    (phone, exclude_call_id, limit)).fetchall()
+        return [{"caller": r[0], "time": fmt_cst(r[1] or 0), "kind": r[2] or "电话",
+                 "duration": fmt_duration(r[3] or 0),
+                 "service_type": r[4] or "", "question": r[5] or "",
+                 "via_card": bool(phone and r[0] != phone)}
+                for r in rows]
 
     def list_records(self, caller: str = "", agent: str = "", kind: str = "",
                      date_from: str = "", date_to: str = "",
@@ -705,6 +844,9 @@ def summarize_call_history(rows: list) -> str:
         if t:
             types[t] = types.get(t, 0) + 1
     parts = [f"该客户历史来电 {len(rows)} 次"]
+    via_card = sum(1 for r in rows if r.get("via_card"))
+    if via_card:
+        parts.append(f"其中同卡号他号来电 {via_card} 次")
     if types:
         ranked = sorted(types.items(), key=lambda kv: -kv[1])
         parts.append("常见问题：" + "、".join(f"{k}×{v}" for k, v in ranked))
@@ -889,9 +1031,24 @@ class Bridge:
 
     def _history_hint(self, rec: CallRecord) -> str:
         """Returning-caller hint from the bridge's own record store:
-        past records for this number, excluding the current call."""
+        past records for this number OR this card number, excluding
+        the current call."""
         try:
-            past = self.store.calls_for_caller(rec.caller, rec.call_id)
+            card = self.store.get_caller_card(rec.caller)
+            past = self.store.calls_for_user(rec.caller, card, rec.call_id)
+            return summarize_call_history(past)
+        except Exception:
+            return ""
+
+    def record_history_hint(self, rowid: int) -> str:
+        """History hint for an existing record: past records for its
+        number OR its card number."""
+        rec = self.store.get_record(rowid)
+        if not rec:
+            return ""
+        try:
+            past = self.store.calls_for_user(rec["caller"], rec["card"],
+                                             rec["call_id"])
             return summarize_call_history(past)
         except Exception:
             return ""

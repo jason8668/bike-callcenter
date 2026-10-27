@@ -52,6 +52,12 @@ bridge = Bridge(
     rotation_agents=_ROTATION_AGENTS,
 )
 
+# Default user tags offered as one-click chips on every record
+# (agents can also type any custom tag; the caller's most-used tags
+# are suggested first, ahead of these defaults).
+DEFAULT_TAGS = ["高频用户", "需回访", "重点关注", "老年用户",
+                "学生用户", "外地游客", "企业用户", "恶意损坏"]
+
 # ------------------------------------------------------------------ login
 # One login, one system: a seat account (8001/8002/8003) logs in at /
 # and lands on the desk. Login = Available by default (calls are sent
@@ -615,6 +621,15 @@ font-size:14px;cursor:pointer;flex-shrink:0;box-shadow:0 4px 12px rgba(0,122,255
 .audio-track{flex:1;height:6px;border-radius:3px;background:rgba(120,120,128,.2);cursor:pointer;overflow:hidden}
 .audio-fill{height:100%;width:0;background:#007aff;border-radius:3px}
 .audio-time{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.user-box{background:linear-gradient(135deg,rgba(52,199,123,.12),rgba(255,204,0,.12));
+border-radius:16px;padding:14px 16px;margin:14px 0}
+.tag-chip{display:inline-flex;align-items:center;gap:4px;background:#007aff;color:#fff;
+border-radius:999px;padding:5px 10px;font-size:13px;margin:0 6px 6px 0}
+.tag-chip button{border:0;background:transparent;color:#fff;font-size:14px;cursor:pointer;line-height:1;padding:0 2px}
+.tag-sug{border:1px solid rgba(0,122,255,.4);background:rgba(0,122,255,.08);color:#007aff;
+border-radius:999px;padding:5px 12px;font-size:13px;margin:0 6px 6px 0;cursor:pointer;font-family:inherit}
+#tagChips{margin-top:2px}
+#tagSuggest{margin-top:10px}
 """
 
 
@@ -766,6 +781,9 @@ var SERVICE_TYPES = ["还车异常", "借车异常", "锁桩故障", "车辆损�
 function $(id) { return document.getElementById(id); }
 function esc(s) {
   return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function attrEsc(s) {
+  return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 function beep() {
   try {
@@ -984,8 +1002,11 @@ async function openRecord(id) {
       '<div class="audio-track" onclick="seekAudio(event)"><div class="audio-fill" id="audioFill"></div></div>' +
       '<span class="audio-time" id="audioTime">0:00 / 0:00</span></div>'
     : '<div style="color:var(--muted)">无录音</div>';
-  var hint = d.history_hint
-    ? '<div class="msg msg-info">' + esc(d.history_hint) + "</div>" : "";
+  // Always render the hint container (hidden when empty) so saving
+  // a card number can reveal card-linked history without a reload.
+  var hint = '<div class="msg msg-info" id="histHint"' +
+    (d.history_hint ? "" : ' style="display:none"') + ">" +
+    esc(d.history_hint || "") + "</div>";
   // Saved content is the lock: a record with a service type or a
   // question opens read-only (已登记）; 修改 unlocks it for editing,
   // and saving locks it again. Empty records stay editable.
@@ -1006,12 +1027,92 @@ async function openRecord(id) {
       ? "<button class='btn btn-ghost' id='notesBtn' style='margin-top:12px' onclick='editNotes()'>修改</button> "
       : "<button class='btn' id='notesBtn' style='margin-top:12px' onclick='saveNotes()'>保存</button> ") +
     "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span></div>" +
+    '<div class="user-box">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+    '<span style="font-weight:600">用户信息</span></div>' +
+    "<label>用户卡号</label>" +
+    '<div style="display:flex;gap:8px"><input id="fCard" value="' + attrEsc(d.card || "") + '" placeholder="输入用户卡号">' +
+    '<button class="btn btn-sm" onclick="saveCard()">保存卡号</button></div>' +
+    '<div id="cardMsg" style="color:var(--muted);font-size:13px;margin-top:4px"></div>' +
+    "<label>用户标签</label>" +
+    '<div id="tagChips"></div>' +
+    '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\'Enter\'){addTag();}">' +
+    '<button class="btn btn-sm" onclick="addTag()">添加</button></div>' +
+    '<div id="tagSuggest"></div></div>' +
     '<div class="meta-grid">' +
     '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
     '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>通话ID</span><b class="mono">' + esc(d.call_id) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>录音</span>' + audio + "</div></div>";
+  currentDefaults = d.default_tags || [];
+  renderTagChips(d.tags || []);
+  var attached = {};
+  (d.tags || []).forEach(function(t) { attached[t] = true; });
+  renderTagSuggest(d.frequent_tags || [], currentDefaults, attached);
   try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
+}
+var currentDefaults = [];
+function renderTagChips(tags) {
+  $("tagChips").innerHTML = tags.length ? tags.map(function(t) {
+    return '<span class="tag-chip">' + esc(t) +
+      ' <button type="button" class="tag-rm" data-tag="' + attrEsc(t) + '">×</button></span>';
+  }).join("") : '<span style="color:var(--muted)">暂无标签</span>';
+  document.querySelectorAll("#tagChips .tag-rm").forEach(function(btn) {
+    btn.onclick = function() { removeTag(btn.getAttribute("data-tag")); };
+  });
+}
+function renderTagSuggest(frequent, defaults, attached) {
+  var html = "";
+  (frequent || []).forEach(function(f) {
+    if (!attached[f.tag]) html += '<button type="button" class="tag-sug" data-tag="' + attrEsc(f.tag) + '">+ ' + esc(f.tag) + "（" + f.count + "次）</button>";
+  });
+  (defaults || []).forEach(function(t) {
+    if (!attached[t]) html += '<button type="button" class="tag-sug" data-tag="' + attrEsc(t) + '">' + esc(t) + "</button>";
+  });
+  $("tagSuggest").innerHTML = html;
+  document.querySelectorAll("#tagSuggest .tag-sug").forEach(function(btn) {
+    btn.onclick = function() { addTag(btn.getAttribute("data-tag")); };
+  });
+}
+async function addTag(tag) {
+  if (!currentId) return;
+  var t = (tag === undefined ? $("fTag").value : tag).trim();
+  if (!t) return;
+  var r = await api("/desk/records/" + currentId + "/tags", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tag: t })
+  });
+  if (!r.ok) return;
+  var d = await r.json();
+  renderTagChips(d.tags);
+  var attached = {};
+  d.tags.forEach(function(x) { attached[x] = true; });
+  renderTagSuggest(d.frequent_tags, currentDefaults, attached);
+  if (tag === undefined) $("fTag").value = "";
+}
+async function removeTag(tag) {
+  if (!currentId) return;
+  var r = await api("/desk/records/" + currentId + "/tags?tag=" + encodeURIComponent(tag), { method: "DELETE" });
+  if (!r.ok) return;
+  var d = await r.json();
+  renderTagChips(d.tags);
+  var attached = {};
+  d.tags.forEach(function(x) { attached[x] = true; });
+  renderTagSuggest(d.frequent_tags, currentDefaults, attached);
+}
+async function saveCard() {
+  if (!currentId) return;
+  var r = await api("/desk/records/" + currentId + "/card", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ card: $("fCard").value.trim() })
+  });
+  if (!r.ok) { $("cardMsg").textContent = "保存失败"; return; }
+  var d = await r.json();
+  $("cardMsg").textContent = d.card ? "已保存：卡号已关联到该号码" : "已清空：该号码的卡号关联已取消";
+  if (d.history_hint) {
+    var hint = $("histHint");
+    if (hint) { hint.textContent = d.history_hint; hint.style.display = "block"; }
+  }
 }
 function editNotes() {
   $("fService").disabled = false;
@@ -1291,10 +1392,50 @@ def desk_record(request: Request, record_id: int):
     rec = bridge.store.get_record(record_id)
     if not rec:
         raise HTTPException(status_code=404, detail="record not found")
-    rec["history_hint"] = summarize_call_history(
-        bridge.store.calls_for_caller(rec["caller"],
-                                      exclude_call_id=rec["call_id"]))
+    rec["history_hint"] = bridge.record_history_hint(record_id)
+    rec["default_tags"] = DEFAULT_TAGS
     return rec
+
+
+@app.post("/desk/records/{record_id}/card")
+async def desk_record_card(request: Request, record_id: int):
+    """Set (or clear) a record's user card number. A non-empty card
+    also becomes this phone's associated card; clearing drops the
+    phone's association too."""
+    require_seat(request)
+    body = await request.json()
+    card = (body.get("card") or "").strip()
+    if not bridge.store.set_record_card(record_id, card):
+        raise HTTPException(status_code=404, detail="record not found")
+    rec = bridge.store.get_record(record_id)
+    return {"ok": True, "card": rec["card"] if rec else card,
+            "history_hint": bridge.record_history_hint(record_id)}
+
+
+@app.post("/desk/records/{record_id}/tags")
+async def desk_record_tag_add(request: Request, record_id: int):
+    require_seat(request)
+    body = await request.json()
+    tag = (body.get("tag") or "").strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="标签不能为空")
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    bridge.store.add_record_tag(record_id, tag)
+    return {"ok": True, "tags": bridge.store.get_record_tags(record_id),
+            "frequent_tags": bridge.store.caller_top_tags(rec["caller"])}
+
+
+@app.delete("/desk/records/{record_id}/tags")
+async def desk_record_tag_del(request: Request, record_id: int, tag: str = ""):
+    require_seat(request)
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    bridge.store.remove_record_tag(record_id, tag)
+    return {"ok": True, "tags": bridge.store.get_record_tags(record_id),
+            "frequent_tags": bridge.store.caller_top_tags(rec["caller"])}
 
 
 @app.post("/desk/records/{record_id}/notes")
