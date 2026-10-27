@@ -725,9 +725,11 @@ class Bridge:
     rotation_agents: list = field(default_factory=list)
 
     def _agent_statuses(self) -> dict:
-        """Seat -> FreeSWITCH agent status (Available / On Break /
-        Logged Out), via the event socket. {} when ESL is unreachable;
-        callers then treat every seat as available."""
+        """Seat -> FreeSWITCH agent status (Available / On Call /
+        On Break / Logged Out), via the event socket. {} when ESL is
+        unreachable; callers then fall back to system login state.
+        The agent list's runtime `state` column wins over the admin
+        `status` column when it marks an agent in a call."""
         out = esl_command("callcenter_config agent list")
         if not out:
             return {}
@@ -740,11 +742,16 @@ class Bridge:
             status_i = header.index("status")
         except ValueError:
             return {}
+        state_i = header.index("state") if "state" in header else -1
         statuses = {}
         for ln in lines[1:]:
             cols = [c.strip() for c in ln.split("|")]
             if len(cols) > max(name_i, status_i):
-                statuses[cols[name_i]] = cols[status_i]
+                status = cols[status_i]
+                if state_i >= 0 and len(cols) > state_i and \
+                        "call" in cols[state_i].lower():
+                    status = "On Call"
+                statuses[cols[name_i]] = status
         return statuses
 
     def seat_web_status(self, seat: str) -> str:

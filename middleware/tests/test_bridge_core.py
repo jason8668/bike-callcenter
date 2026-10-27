@@ -565,6 +565,20 @@ class TestAgentStatus(unittest.TestCase):
         self.assertFalse(self.bridge.ensure_online("8003"))  # ends On Break, not Available
         self.assertTrue(any("8003" in c and "On Break" in c for c in self.commands))
 
+    def test_agent_statuses_state_column_marks_on_call(self):
+        self.table = ("name|status|state\n"
+                      "8001|Available|In a queue call\n"
+                      "8002|Available|Idle\n"
+                      "8003|On Break|Idle\n")
+        statuses = self.bridge._agent_statuses()
+        self.assertEqual(statuses, {"8001": "On Call", "8002": "Available",
+                                    "8003": "On Break"})
+
+    def test_agent_statuses_without_state_column_unchanged(self):
+        statuses = self.bridge._agent_statuses()
+        self.assertEqual(statuses, {"8001": "Available", "8002": "On Break",
+                                    "8003": "Logged Out"})
+
     def test_ensure_online_no_session_is_noop(self):
         # 8003 is Logged Out in the queue table, but without a live
         # session the bridge must not revive it.

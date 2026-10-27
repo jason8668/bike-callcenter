@@ -688,7 +688,7 @@ def desk_page_html(seat: str) -> str:
 <div class="topbar">
   <div class="brand"><span class="logo">🚲</span> 自行车客服工作台</div>
   <div class="spacer"></div>
-  <span>坐席 <b id="seatLabel">__SEAT__</b></span>
+  <span>客服 <b id="seatLabel">__SEAT__</b></span>
   <span id="statusPill" class="pill pill-gray">未知</span>
   <label class="switch-wrap"><span>接单</span><span class="switch"><input type="checkbox" id="busySwitch" checked><span class="slider"></span></span></label>
   <form method="post" action="/logout" style="margin:0">
@@ -701,7 +701,7 @@ def desk_page_html(seat: str) -> str:
     <button class="btn btn-sm btn-ghost" style="float:right"
       onclick="document.getElementById('alert').classList.remove('show')">知道了</button>
   </div>
-  <div id="queueWarn" class="queue-warn">⚠️ 话务层未连接（FreeSWITCH 还没装好）：下面坐席状态是按系统登录状态显示的（登录即接单中，置忙即置忙）；电话实际分流要等话务层装好后才生效。记录、补填、导出都正常。</div>
+  <div id="queueWarn" class="queue-warn">⚠️ 话务层未连接（FreeSWITCH 还没装好）：下面坐席状态是按系统登录状态显示的（登录即空闲，置忙即置忙）；电话实际分流要等话务层装好后才生效。记录、补填、导出都正常。</div>
   <div class="grid">
     <div class="card list-col">
       <h2>通话记录</h2>
@@ -733,7 +733,7 @@ def desk_page_html(seat: str) -> str:
       <div class="card">
         <h2>坐席状态</h2>
         <div id="seatStrip" class="seats"><span style="color:var(--muted)">加载中…</span></div>
-        <div class="seat-note">状态由登录自动决定，不用选也不能改别人的：登录即接单中，自己置忙变置忙，退出变未登录。</div>
+        <div class="seat-note">状态由登录自动决定，不用选也不能改别人的：登录即空闲，自己置忙变置忙，退出变离线。</div>
       </div>
       <div class="card">
         <h2>我的统计与历史</h2>
@@ -786,13 +786,15 @@ function kindPill(k) {
   return '<span class="pill ' + cls + '">' + esc(k) + '</span>';
 }
 function statusLabel(s) {
-  if (s === "Available") return ["dot-green", "接单中"];
+  if (s === "Available") return ["dot-green", "空闲"];
+  if (s === "On Call") return ["dot-green", "正在接听中"];
   if (s === "On Break") return ["dot-amber", "置忙"];
-  if (s === "Logged Out") return ["dot-gray", "未登录"];
+  if (s === "Logged Out") return ["dot-gray", "离线"];
   return ["dot-gray", "未知"];
 }
 var statRange = "today";
 async function refreshMe() {
+  try {
   var q = new URLSearchParams({ range_name: statRange });
   if (statRange === "custom" && $("statFrom").value && $("statTo").value) {
     q.set("from_date", $("statFrom").value);
@@ -805,7 +807,7 @@ async function refreshMe() {
   var pill = $("statusPill");
   pill.className = "pill " + (st[0] === "dot-green" ? "pill-green" : (st[0] === "dot-amber" ? "pill-amber" : "pill-gray"));
   pill.textContent = st[1];
-  if (d.status === "Available") $("busySwitch").checked = true;
+  if (d.status === "Available" || d.status === "On Call") $("busySwitch").checked = true;
   if (d.status === "On Break") $("busySwitch").checked = false;
   $("statCalls").textContent = d.stats.calls;
   $("statVm").textContent = d.stats.voicemails;
@@ -815,8 +817,13 @@ async function refreshMe() {
     return '<div class="hist">' + kindPill(h.kind) + " " + esc(h.caller) + " · " + esc(h.duration) +
       '<span class="t">　' + esc(h.time) + '</span></div>';
   }).join("") : '<div class="empty">暂无历史记录</div>';
+  } catch (e) {
+    if (e && e.message === "unauth") return;  // api() already redirects to /login
+    $("history").innerHTML = '<div class="empty">加载失败 <button class="btn btn-sm btn-ghost" onclick="refreshMe()">重试</button></div>';
+  }
 }
 async function refreshSeats() {
+  try {
   var r = await api("/desk/statuses");
   var d = await r.json();
   $("seatStrip").innerHTML = Object.keys(d.agents).sort().map(function(s) {
@@ -824,8 +831,13 @@ async function refreshSeats() {
     return '<span class="seat-chip"><span class="dot ' + st[0] + '"></span>' + esc(s) + " " + st[1] + "</span>";
   }).join("");
   $("queueWarn").classList.toggle("show", !d.queue_connected);
+  } catch (e) {
+    if (e && e.message === "unauth") return;
+    $("seatStrip").innerHTML = '<span style="color:var(--muted)">加载失败 <button class="btn btn-sm btn-ghost" onclick="refreshSeats()">重试</button></span>';
+  }
 }
 async function refreshList() {
+  try {
   var q = new URLSearchParams({
     caller: $("fCaller").value, kind: $("fKind").value,
     date: $("fDate").value, offset: String(offset), limit: "50"
@@ -844,6 +856,10 @@ async function refreshList() {
   }).join("") : '<div class="empty">没有符合条件的记录</div>';
   $("prevBtn").disabled = offset <= 0;
   $("nextBtn").disabled = rows.length < 50;
+  } catch (e) {
+    if (e && e.message === "unauth") return;
+    $("list").innerHTML = '<div class="empty">加载失败 <button class="btn btn-sm btn-ghost" onclick="refreshList()">重试</button></div>';
+  }
 }
 function searchList() { offset = 0; refreshList(); }
 function changePage(step) {
@@ -970,14 +986,25 @@ async function openRecord(id) {
     : '<div style="color:var(--muted)">无录音</div>';
   var hint = d.history_hint
     ? '<div class="msg msg-info">' + esc(d.history_hint) + "</div>" : "";
+  // Saved content is the lock: a record with a service type or a
+  // question opens read-only (已登记）; 修改 unlocks it for editing,
+  // and saving locks it again. Empty records stay editable.
+  var locked = !!(d.service_type || (d.question && d.question.trim()));
+  var dis = locked ? " disabled" : "";
   $("detail").innerHTML = "<h2>记录详情</h2>" + hint +
     '<div class="detail-head"><span class="detail-caller">' + esc(d.caller) + "</span>" +
     kindPill(d.kind) + '<span class="detail-time">' + esc(d.time) + "</span></div>" +
     '<div class="notes-box">' +
-    "<label>服务类型</label><select id='fService'><option value=''></option>" + opts + "</select>" +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+    '<span style="font-weight:600">登记内容</span>' +
+    (locked ? '<span class="pill pill-green" id="regPill">已登记</span>'
+            : '<span class="pill pill-gray" id="regPill">未登记</span>') + "</div>" +
+    "<label>服务类型</label><select id='fService'" + dis + "><option value=''></option>" + opts + "</select>" +
     "<label>通话内容（客户问的什么问题）</label>" +
-    "<textarea id='fQuestion' rows='3'>" + esc(d.question) + "</textarea>" +
-    "<button class='btn' style='margin-top:12px' onclick='saveNotes()'>保存</button> " +
+    "<textarea id='fQuestion' rows='3'" + dis + ">" + esc(d.question) + "</textarea>" +
+    (locked
+      ? "<button class='btn btn-ghost' id='notesBtn' style='margin-top:12px' onclick='editNotes()'>修改</button> "
+      : "<button class='btn' id='notesBtn' style='margin-top:12px' onclick='saveNotes()'>保存</button> ") +
     "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span></div>" +
     '<div class="meta-grid">' +
     '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
@@ -986,14 +1013,42 @@ async function openRecord(id) {
     '<div class="meta-item meta-wide"><span>录音</span>' + audio + "</div></div>";
   try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
 }
+function editNotes() {
+  $("fService").disabled = false;
+  $("fQuestion").disabled = false;
+  var btn = $("notesBtn");
+  btn.textContent = "保存";
+  btn.className = "btn";
+  btn.onclick = saveNotes;
+}
 async function saveNotes() {
   if (!currentId) return;
+  var st = $("fService").value, q = $("fQuestion").value;
   var r = await api("/desk/records/" + currentId + "/notes", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ service_type: $("fService").value, question: $("fQuestion").value })
+    body: JSON.stringify({ service_type: st, question: q })
   });
-  $("saveMsg").textContent = r.ok ? "已保存" : "保存失败";
-  if (r.ok) refreshList();
+  if (!r.ok) { $("saveMsg").textContent = "保存失败"; return; }
+  refreshList();
+  // Saving settles the lock: non-empty content locks the form and
+  // shows 已登记； saving it empty again leaves it editable.
+  var locked = !!(st || (q && q.trim()));
+  $("fService").disabled = locked;
+  $("fQuestion").disabled = locked;
+  var btn = $("notesBtn");
+  if (locked) {
+    btn.textContent = "修改";
+    btn.className = "btn btn-ghost";
+    btn.onclick = editNotes;
+  } else {
+    btn.textContent = "保存";
+    btn.className = "btn";
+    btn.onclick = saveNotes;
+  }
+  var pill = $("regPill");
+  pill.textContent = locked ? "已登记" : "未登记";
+  pill.className = locked ? "pill pill-green" : "pill pill-gray";
+  $("saveMsg").textContent = "";
 }
 $("busySwitch").onchange = async function() {
   var busy = !$("busySwitch").checked;
@@ -1029,6 +1084,7 @@ $("kindSeg").onclick = function(e) {
   searchList();
 };
 async function pollFeed() {
+  try {
   var r = await api("/desk/feed");
   var d = await r.json();
   var rows = d.records || [];
@@ -1042,6 +1098,7 @@ async function pollFeed() {
     refreshList();
   }
   baseline = rows[0].rowid;
+  } catch (e) { /* next poll retries in 3s */ }
 }
 refreshMe(); refreshSeats(); refreshList(); pollFeed();
 setInterval(pollFeed, 3000);
