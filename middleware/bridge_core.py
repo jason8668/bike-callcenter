@@ -409,6 +409,15 @@ class CallStore:
             c.execute("DELETE FROM sessions WHERE created_at < ?",
                       (now - self.SESSION_TTL_SEC,))
 
+    def set_busy_flag(self, seat: str, busy: bool) -> None:
+        """Desk busy toggle, bridge-side (meta key). This is the
+        system-side busy state: it moves even when the queue
+        (FreeSWITCH) is unreachable, and login clears it."""
+        self.meta_set(f"busy:{seat}", "1" if busy else "0")
+
+    def get_busy_flag(self, seat: str) -> bool:
+        return self.meta_get(f"busy:{seat}", "0") == "1"
+
     def answered_calls_by_agent(self, agent: str) -> int:
         """Answered inbound calls handled by one agent (the queue CDRs
         carry the answering agent in cc_agent). Internal calls and
@@ -599,6 +608,43 @@ class CallStore:
             })
         return out
 
+    def agent_stats_range(self, agent: str, start_epoch: int, end_epoch: int) -> dict:
+        """One seat's handled contacts inside [start_epoch, end_epoch):
+        answered queue calls (by cc_agent) and assigned voicemails
+        (by owner seat). Table-based, so any window works - unlike
+        the meta voicemail counter, which is cumulative only."""
+        with self._conn() as c:
+            calls = c.execute(
+                "SELECT COUNT(*) FROM calls WHERE answered=1 AND agent=? "
+                "AND start_epoch>=? AND start_epoch<?",
+                (agent, start_epoch, end_epoch)).fetchone()[0]
+            vms = c.execute(
+                "SELECT COUNT(*) FROM calls WHERE is_record=1 AND kind='留言' "
+                "AND owner_seat=? AND start_epoch>=? AND start_epoch<?",
+                (agent, start_epoch, end_epoch)).fetchone()[0]
+        return {"calls": calls, "voicemails": vms}
+
+    def agent_history_range(self, agent: str, start_epoch: int, end_epoch: int,
+                            limit: int = 50) -> list[dict]:
+        """Like agent_history, but only contacts inside the window."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT rowid, caller, duration_sec, start_epoch, kind, owner_seat"
+                " FROM calls WHERE is_record=1 AND start_epoch>=? AND start_epoch<? AND"
+                " ((answered=1 AND agent=?) OR (owner_seat=? AND owner_seat != ''))"
+                " ORDER BY rowid DESC LIMIT ?",
+                (start_epoch, end_epoch, agent, agent, limit)).fetchall()
+        out = []
+        for rowid, caller, dur, start, kind, owner in rows:
+            out.append({
+                "caller": caller,
+                "kind": kind or ("留言" if owner else "电话"),
+                "duration": fmt_duration(dur or 0),
+                "time": fmt_cst(start or 0),
+                "record_id": rowid,
+            })
+        return out
+
     def list_calls(self, start_epoch: int = 0) -> list[dict]:
         """Record rows for the Excel export, oldest first (legacy
         Kinghav-style columns: time, caller, agent, duration, channel,
@@ -701,11 +747,49 @@ class Bridge:
                 statuses[cols[name_i]] = cols[status_i]
         return statuses
 
+    def seat_web_status(self, seat: str) -> str:
+        """System-side seat status from login state alone: Logged Out
+        when no live session, else On Break when the desk toggle set
+        busy, else Available. Login alone makes a seat Available -
+        this never waits for the queue."""
+        if seat not in self.store.seats_with_live_sessions():
+            return "Logged Out"
+        return "On Break" if self.store.get_busy_flag(seat) else "Available"
+
+    def statuses_with_source(self) -> tuple[dict, bool]:
+        """(seat -> status, queue_connected). When the queue answers,
+        its statuses are the routing truth (they include phone-side
+        *51/*52 busy). When it does not answer, statuses fall back
+        to system login state, so a logged-in agent still shows
+        online instead of 'unknown'."""
+        esl = self._agent_statuses()
+        if esl:
+            return {a: esl.get(a, "unknown") for a in self.rotation_agents}, True
+        return {a: self.seat_web_status(a) for a in self.rotation_agents}, False
+
     def get_agent_statuses(self) -> dict:
-        """Roster seats mapped to their queue status (or 'unknown'
-        when ESL cannot be reached)."""
-        statuses = self._agent_statuses()
-        return {a: statuses.get(a, "unknown") for a in self.rotation_agents}
+        """Roster seats mapped to their status (queue truth when
+        reachable, system login state otherwise)."""
+        return self.statuses_with_source()[0]
+
+    def set_seat_busy(self, seat: str, busy: bool) -> tuple[str, bool]:
+        """Desk busy toggle. The bridge-side flag always moves
+        (system status); the queue is updated when reachable.
+        Returns (status, queue_updated). Raises ValueError on a real
+        queue error, so the two cannot silently disagree while the
+        queue is connected."""
+        target = "On Break" if busy else "Available"
+        out = esl_command(f"callcenter_config agent set status {seat} '{target}'")
+        if out and out.strip().startswith("+OK"):
+            self.store.set_busy_flag(seat, busy)
+            return target, True
+        if out is None:
+            # Queue unreachable: system status still moves; it syncs
+            # to the queue on the next login/toggle once FreeSWITCH
+            # is up (login always re-asserts Available).
+            self.store.set_busy_flag(seat, busy)
+            return target, False
+        raise ValueError((out or "queue error").strip()[:200])
 
     def get_agent_history(self, seat: str) -> dict:
         """One seat's homepage data: how many calls they answered
@@ -732,16 +816,20 @@ class Bridge:
         return False, (out or "event socket unreachable").strip()[:200]
 
     def ensure_online(self, seat: str) -> bool:
-        """Re-assert Available for a seat that is Logged Out (e.g. an
-        agent who reopened the desk after the stale cleanup logged them
-        out). On Break seats are never touched. Returns True when the
-        seat is (now) Available."""
+        """Re-assert the queue status for a seat with a live session
+        that the queue reports as Logged Out (e.g. queue restarted).
+        Restores the bridge-side state (busy stays busy), never
+        blindly Available. No-op when the queue is unreachable or
+        the seat has no live session. Returns True when the seat ends
+        up Available."""
+        if seat not in self.store.seats_with_live_sessions():
+            return False
         statuses = self._agent_statuses()
-        current = statuses.get(seat)
-        if current == "Logged Out":
-            ok, _ = self.set_agent_status(seat, "Available")
-            return ok
-        return current == "Available"
+        if statuses.get(seat) != "Logged Out":
+            return statuses.get(seat) == "Available"
+        target = "On Break" if self.store.get_busy_flag(seat) else "Available"
+        ok, _ = self.set_agent_status(seat, target)
+        return ok and target == "Available"
 
     def logout_stale_seats(self) -> list:
         """Log out seats whose sessions all went stale (browser closed

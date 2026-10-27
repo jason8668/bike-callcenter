@@ -343,6 +343,114 @@ class TestAgentHistory(unittest.TestCase):
         self.assertEqual(third["history"][0]["kind"], "留言")
 
 
+class TestSeatWebStatus(unittest.TestCase):
+    """System-side status: login state, not the queue, when ESL is down."""
+
+    def setUp(self):
+        import bridge_core
+        self.tmp = tempfile.mkdtemp()
+        self.bridge = make_bridge(self.tmp)
+        self.commands = []
+        self.table = ("name|status\n"
+                      "8001|Available\n8002|On Break\n8003|Logged Out\n")
+
+        def stub(cmd):
+            self.commands.append(cmd)
+            if cmd.startswith("callcenter_config agent list"):
+                return self.table
+            if cmd.startswith("callcenter_config agent set status"):
+                return "+OK"
+            return None
+
+        self._orig_esl = bridge_core.esl_command
+        bridge_core.esl_command = stub
+        self.addCleanup(setattr, bridge_core, "esl_command", self._orig_esl)
+
+    def test_web_status_from_login_state(self):
+        store = self.bridge.store
+        self.assertEqual(self.bridge.seat_web_status("8001"), "Logged Out")
+        store.create_session("8001")
+        self.assertEqual(self.bridge.seat_web_status("8001"), "Available")
+        store.set_busy_flag("8001", True)
+        self.assertEqual(self.bridge.seat_web_status("8001"), "On Break")
+        store.set_busy_flag("8001", False)
+        self.assertEqual(self.bridge.seat_web_status("8001"), "Available")
+
+    def test_statuses_fall_back_to_web_when_esl_down(self):
+        import bridge_core
+        bridge_core.esl_command = lambda cmd: None
+        self.bridge.store.create_session("8001")
+        statuses, connected = self.bridge.statuses_with_source()
+        self.assertFalse(connected)
+        self.assertEqual(statuses, {"8001": "Available", "8002": "Logged Out",
+                                    "8003": "Logged Out"})
+
+    def test_statuses_prefer_queue_when_reachable(self):
+        self.bridge.store.create_session("8001")
+        statuses, connected = self.bridge.statuses_with_source()
+        self.assertTrue(connected)
+        self.assertEqual(statuses["8002"], "On Break")  # queue wins over web
+        self.assertEqual(statuses["8003"], "Logged Out")
+
+    def test_set_seat_busy_records_flag_when_esl_down(self):
+        import bridge_core
+        bridge_core.esl_command = lambda cmd: None
+        status, queue_updated = self.bridge.set_seat_busy("8001", True)
+        self.assertEqual(status, "On Break")
+        self.assertFalse(queue_updated)
+        self.assertTrue(self.bridge.store.get_busy_flag("8001"))
+
+    def test_set_seat_busy_raises_on_real_queue_error(self):
+        import bridge_core
+        bridge_core.esl_command = lambda cmd: "-ERR no such agent"
+        with self.assertRaises(ValueError):
+            self.bridge.set_seat_busy("8001", True)
+        self.assertFalse(self.bridge.store.get_busy_flag("8001"))
+
+
+class TestRangeStats(unittest.TestCase):
+    """Stats/history windows: today/week/month/custom, table-based."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bridge = make_bridge(self.tmp)
+        self.base = 1792800000  # 2026-10-27-ish epoch base for windows
+        with sqlite3.connect(os.path.join(self.tmp, "b.db")) as c:
+            rows = [
+                # (call_id, caller, answered, agent, owner, kind, start)
+                ("c1", "13800000001", 1, "8001", "", "电话", self.base + 100),
+                ("c2", "13800000002", 1, "8001", "", "电话", self.base + 200),
+                ("c3", "13800000003", 1, "8002", "", "电话", self.base + 300),
+                ("old", "13800000009", 1, "8001", "", "电话", self.base - 90000),
+                ("v1", "13900000001", 1, "", "8001", "留言", self.base + 400),
+                ("v2", "13900000002", 1, "", "8001", "留言", self.base - 90000),
+            ]
+            for cid, caller, ans, agent, owner, kind, start in rows:
+                c.execute(
+                    "INSERT INTO calls (call_id, caller, answered, agent,"
+                    " owner_seat, is_record, kind, start_epoch, duration_sec)"
+                    " VALUES (?,?,?,?,?,1,?,?,65)",  # is_record=1, dur=65
+                    (cid, caller, ans, agent, owner, kind, start))
+
+    def test_stats_range_counts_only_window(self):
+        s = self.bridge.store.agent_stats_range("8001", self.base, self.base + 1000)
+        self.assertEqual(s, {"calls": 2, "voicemails": 1})
+        s = self.bridge.store.agent_stats_range("8001", self.base - 100000,
+                                                self.base - 80000)
+        self.assertEqual(s, {"calls": 1, "voicemails": 1})
+        s = self.bridge.store.agent_stats_range("8002", self.base, self.base + 1000)
+        self.assertEqual(s, {"calls": 1, "voicemails": 0})
+
+    def test_history_range_filters_and_orders(self):
+        h = self.bridge.store.agent_history_range("8001", self.base, self.base + 1000)
+        self.assertEqual([r["caller"] for r in h],
+                         ["13900000001", "13800000002", "13800000001"])
+        self.assertTrue(all(r["record_id"] for r in h))
+        h = self.bridge.store.agent_history_range("8001", self.base - 100000,
+                                                  self.base - 80000)
+        self.assertEqual(len(h), 2)  # one old call + one old voicemail
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -438,13 +546,31 @@ class TestAgentStatus(unittest.TestCase):
         ok, _ = self.bridge.set_agent_status("8001", "Available")
         self.assertFalse(ok)
 
-    def test_ensure_online_only_revives_logged_out(self):
+    def test_ensure_online_only_revives_logged_out_with_live_session(self):
+        store = self.bridge.store
+        store.create_session("8003")  # live: Logged Out revives to Available
         self.assertTrue(self.bridge.ensure_online("8003"))
         self.assertTrue(any("8003" in c and "Available" in c for c in self.commands))
+        store.create_session("8002")  # live: On Break untouched
+        store.create_session("8001")  # live: Available untouched
         before = len(self.commands)
-        self.assertFalse(self.bridge.ensure_online("8002"))  # On Break: untouched
-        self.assertTrue(self.bridge.ensure_online("8001"))   # Available: untouched
+        self.assertFalse(self.bridge.ensure_online("8002"))
+        self.assertTrue(self.bridge.ensure_online("8001"))
         self.assertEqual(len(self.commands), before + 2)  # two list calls only
+
+    def test_ensure_online_restores_busy_flag(self):
+        store = self.bridge.store
+        store.create_session("8003")
+        store.set_busy_flag("8003", True)
+        self.assertFalse(self.bridge.ensure_online("8003"))  # ends On Break, not Available
+        self.assertTrue(any("8003" in c and "On Break" in c for c in self.commands))
+
+    def test_ensure_online_no_session_is_noop(self):
+        # 8003 is Logged Out in the queue table, but without a live
+        # session the bridge must not revive it.
+        before = len(self.commands)
+        self.assertFalse(self.bridge.ensure_online("8003"))
+        self.assertEqual(len(self.commands), before)  # not even a list call
 
     def test_logout_stale_seats(self):
         store = self.bridge.store

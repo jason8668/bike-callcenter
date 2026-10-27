@@ -576,6 +576,19 @@ audio{width:100%;margin-top:8px}
 .detail-sticky{position:sticky;top:68px}
 .right-col{display:flex;flex-direction:column;gap:20px}
 @media(max-width:1100px){.grid{grid-template-columns:1fr}.detail-col{order:-1}.detail-sticky{position:static}}
+.detail-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+.detail-caller{font-size:24px;font-weight:700;letter-spacing:-.3px}
+.detail-time{color:var(--muted);font-size:13px}
+.notes-box{background:linear-gradient(135deg,rgba(0,122,255,.12),rgba(88,86,214,.12));
+border-radius:16px;padding:14px 16px;margin:14px 0}
+.notes-box label{margin-top:8px}
+.notes-box label:first-child{margin-top:0}
+.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.meta-item{background:rgba(120,120,128,.08);border-radius:12px;padding:10px 12px}
+.meta-item span{display:block;color:var(--muted);font-size:12px;margin-bottom:2px}
+.meta-item b{font-size:14px;font-weight:600}
+.meta-item .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
+.meta-wide{grid-column:1 / -1}
 """
 
 
@@ -662,7 +675,7 @@ def desk_page_html(seat: str) -> str:
     <button class="btn btn-sm btn-ghost" style="float:right"
       onclick="document.getElementById('alert').classList.remove('show')">知道了</button>
   </div>
-  <div id="queueWarn" class="queue-warn">⚠️ 话务层未连接（FreeSWITCH 还没装好）：接单开关和坐席状态暂时不可用，登录也不会显示接单中；记录、补填、导出都正常。等话务层装好后这条提示自动消失。</div>
+  <div id="queueWarn" class="queue-warn">⚠️ 话务层未连接（FreeSWITCH 还没装好）：下面坐席状态是按系统登录状态显示的（登录即接单中，置忙即置忙）；电话实际分流要等话务层装好后才生效。记录、补填、导出都正常。</div>
   <div class="grid">
     <div class="card list-col">
       <h2>通话记录</h2>
@@ -698,9 +711,21 @@ def desk_page_html(seat: str) -> str:
       </div>
       <div class="card">
         <h2>我的统计与历史</h2>
+        <div class="seg" id="statRangeSeg">
+          <button type="button" data-range="today" class="on">今日</button>
+          <button type="button" data-range="week">本周</button>
+          <button type="button" data-range="month">本月</button>
+          <button type="button" data-range="custom">自定义</button>
+        </div>
+        <div id="customRange" style="display:none;margin-top:10px">
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="date" id="statFrom"><span>至</span><input type="date" id="statTo">
+            <button class="btn btn-sm" onclick="applyStatRange()">应用</button>
+          </div>
+        </div>
+        <div id="rangeLabel" style="color:var(--muted);font-size:13px;margin:12px 0 4px"></div>
         <div class="stats">
-          <div class="stat stat-blue"><b id="statToday">–</b><span>今日接听</span></div>
-          <div class="stat stat-green"><b id="statTotal">–</b><span>累计接听</span></div>
+          <div class="stat stat-blue"><b id="statCalls">–</b><span>接听</span></div>
           <div class="stat stat-purple"><b id="statVm">–</b><span>分派留言</span></div>
         </div>
         <div id="history"><div class="empty">加载中…</div></div>
@@ -739,8 +764,14 @@ function statusLabel(s) {
   if (s === "Logged Out") return ["dot-gray", "未登录"];
   return ["dot-gray", "未知"];
 }
+var statRange = "today";
 async function refreshMe() {
-  var r = await api("/desk/me");
+  var q = new URLSearchParams({ range_name: statRange });
+  if (statRange === "custom" && $("statFrom").value && $("statTo").value) {
+    q.set("from_date", $("statFrom").value);
+    q.set("to_date", $("statTo").value);
+  }
+  var r = await api("/desk/me?" + q.toString());
   var d = await r.json();
   $("seatLabel").textContent = d.seat;
   var st = statusLabel(d.status);
@@ -749,9 +780,10 @@ async function refreshMe() {
   pill.textContent = st[1];
   if (d.status === "Available") $("busySwitch").checked = true;
   if (d.status === "On Break") $("busySwitch").checked = false;
-  $("statToday").textContent = d.stats.calls_today;
-  $("statTotal").textContent = d.stats.calls_total;
+  $("statCalls").textContent = d.stats.calls;
   $("statVm").textContent = d.stats.voicemails;
+  $("rangeLabel").textContent = d.range_label;
+  $("queueWarn").classList.toggle("show", !d.queue_connected);
   $("history").innerHTML = d.history.length ? d.history.map(function(h) {
     return '<div class="hist">' + kindPill(h.kind) + " " + esc(h.caller) + " · " + esc(h.duration) +
       '<span class="t">　' + esc(h.time) + '</span></div>';
@@ -764,9 +796,7 @@ async function refreshSeats() {
     var st = statusLabel(d.agents[s]);
     return '<span class="seat-chip"><span class="dot ' + st[0] + '"></span>' + esc(s) + " " + st[1] + "</span>";
   }).join("");
-  var keys = Object.keys(d.agents);
-  var allUnknown = keys.length > 0 && keys.every(function(s) { return d.agents[s] === "unknown"; });
-  $("queueWarn").classList.toggle("show", allUnknown);
+  $("queueWarn").classList.toggle("show", !d.queue_connected);
 }
 async function refreshList() {
   var q = new URLSearchParams({
@@ -811,20 +841,19 @@ async function openRecord(id) {
   var hint = d.history_hint
     ? '<div class="msg msg-info">' + esc(d.history_hint) + "</div>" : "";
   $("detail").innerHTML = "<h2>记录详情</h2>" + hint +
-    "<dl>" +
-    "<dt>登记时间</dt><dd>" + esc(d.time) + "</dd>" +
-    "<dt>联系电话</dt><dd>" + esc(d.caller) + "</dd>" +
-    "<dt>类型</dt><dd>" + kindPill(d.kind) + "</dd>" +
-    "<dt>客服人员</dt><dd>" + esc(d.agent || d.owner_seat || "") + "</dd>" +
-    "<dt>通话时长</dt><dd>" + esc(d.duration) + "</dd>" +
-    "<dt>通话ID</dt><dd>" + esc(d.call_id) + "</dd>" +
-    "<dt>录音</dt><dd>" + audio + "</dd>" +
-    "</dl>" +
+    '<div class="detail-head"><span class="detail-caller">' + esc(d.caller) + "</span>" +
+    kindPill(d.kind) + '<span class="detail-time">' + esc(d.time) + "</span></div>" +
+    '<div class="notes-box">' +
     "<label>服务类型</label><select id='fService'><option value=''></option>" + opts + "</select>" +
     "<label>通话内容（客户问的什么问题）</label>" +
-    "<textarea id='fQuestion' rows='4'>" + esc(d.question) + "</textarea>" +
-    "<button class='btn' style='margin-top:14px' onclick='saveNotes()'>保存</button> " +
-    "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span>";
+    "<textarea id='fQuestion' rows='3'>" + esc(d.question) + "</textarea>" +
+    "<button class='btn' style='margin-top:12px' onclick='saveNotes()'>保存</button> " +
+    "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span></div>" +
+    '<div class="meta-grid">' +
+    '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
+    '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div>" +
+    '<div class="meta-item meta-wide"><span>通话ID</span><b class="mono">' + esc(d.call_id) + "</b></div>" +
+    '<div class="meta-item meta-wide"><span>录音</span>' + audio + "</div></div>";
   try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
 }
 async function saveNotes() {
@@ -842,9 +871,24 @@ $("busySwitch").onchange = async function() {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ busy: busy })
   });
-  if (!r.ok) { alert("置忙失败：话务层还没运行（FreeSWITCH 未安装），等话务层装好后开关才能用。记录、补填、导出不受影响。"); $("busySwitch").checked = !busy; return; }
+  if (!r.ok) { alert("置忙失败，请稍后再试"); $("busySwitch").checked = !busy; return; }
   refreshMe(); refreshSeats();
 };
+$("statRangeSeg").onclick = function(e) {
+  var btn = e.target.closest ? e.target.closest("button") : null;
+  if (!btn) return;
+  var buttons = $("statRangeSeg").getElementsByTagName("button");
+  for (var i = 0; i < buttons.length; i++) buttons[i].classList.remove("on");
+  btn.classList.add("on");
+  statRange = btn.getAttribute("data-range");
+  $("customRange").style.display = statRange === "custom" ? "block" : "none";
+  if (statRange !== "custom") refreshMe();
+};
+function applyStatRange() {
+  if (!$("statFrom").value || !$("statTo").value) { alert("请把开始和结束日期都选上"); return; }
+  if ($("statFrom").value > $("statTo").value) { alert("开始日期不能晚于结束日期"); return; }
+  refreshMe();
+}
 $("kindSeg").onclick = function(e) {
   var btn = e.target.closest ? e.target.closest("button") : null;
   if (!btn) return;
@@ -905,9 +949,10 @@ async def login_post(request: Request):
         return login_page(_ROTATION_AGENTS, bridge.store.has_agents(),
                           error="坐席或密码不对，请重试。")
     token = bridge.store.create_session(seat)
-    # Login = Available by default: calls go to this seat unless the
-    # agent later sets themselves On Break. ESL down must not block
-    # login (queue status then shows 未知）.
+    # Login = Available by default: the system-side state moves even
+    # when the queue is unreachable, so a logged-in agent always
+    # shows online (queue sync is best-effort here).
+    bridge.store.set_busy_flag(seat, False)
     bridge.set_agent_status(seat, "Available")
     resp = RedirectResponse("/desk", status_code=303)
     resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
@@ -920,6 +965,7 @@ async def logout_post(request: Request):
     token = request.cookies.get(SESSION_COOKIE)
     seat = bridge.store.delete_session(token) if token else None
     if seat:
+        bridge.store.set_busy_flag(seat, False)
         bridge.set_agent_status(seat, "Logged Out")
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie(SESSION_COOKIE, path="/")
@@ -975,34 +1021,72 @@ def desk_feed(request: Request):
     return {"records": bridge.store.recent_records(20)}
 
 
+def range_bounds(range_name: str, from_s: str, to_s: str):
+    """[start, end) epoch bounds + label for a stats window
+    (Asia/Shanghai). today: today; week: Monday-based week; month:
+    calendar month; custom: from..to inclusive by date. Falls back
+    to today on any bad input."""
+    cst = timezone(timedelta(hours=8))
+    now = datetime.now(cst)
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day = timedelta(days=1)
+    if range_name == "week":
+        start = today0 - timedelta(days=today0.weekday())
+        end = start + 7 * day
+        label = "本周 · " + start.strftime("%m-%d") + "～" + (end - day).strftime("%m-%d")
+    elif range_name == "month":
+        start = today0.replace(day=1)
+        end = (start + timedelta(days=32)).replace(day=1)
+        label = "本月 · " + start.strftime("%Y-%m")
+    elif range_name == "custom":
+        try:
+            start = datetime.strptime(from_s, "%Y-%m-%d").replace(tzinfo=cst)
+            end = datetime.strptime(to_s, "%Y-%m-%d").replace(tzinfo=cst) + day
+            if end <= start:
+                raise ValueError
+            label = "自定义 · " + from_s + "～" + to_s
+        except (ValueError, TypeError):
+            start, end = today0, today0 + day
+            label = "今日 · " + today0.strftime("%m-%d")
+    else:
+        start, end = today0, today0 + day
+        label = "今日 · " + today0.strftime("%m-%d")
+    return int(start.timestamp()), int(end.timestamp()), label
+
+
 @app.get("/desk/me")
-def desk_me(request: Request):
+def desk_me(request: Request, range_name: str = "today",
+            from_date: str = "", to_date: str = ""):
     seat = require_seat(request)
     try:
         bridge.ensure_online(seat)
     except Exception:
         pass
-    statuses = bridge.get_agent_statuses()
-    data = bridge.get_agent_history(seat)
-    data["status"] = statuses.get(seat, "unknown")
-    return data
+    statuses, connected = bridge.statuses_with_source()
+    start, end, label = range_bounds(range_name, from_date, to_date)
+    return {"seat": seat, "status": statuses.get(seat, "unknown"),
+            "queue_connected": connected,
+            "stats": bridge.store.agent_stats_range(seat, start, end),
+            "history": bridge.store.agent_history_range(seat, start, end),
+            "range_label": label}
 
 
 @app.get("/desk/statuses")
 def desk_statuses(request: Request):
     require_seat(request)
-    return {"agents": bridge.get_agent_statuses()}
+    statuses, connected = bridge.statuses_with_source()
+    return {"agents": statuses, "queue_connected": connected}
 
 
 @app.post("/desk/busy")
 async def desk_busy(request: Request):
     seat = require_seat(request)
     body = await request.json()
-    target = "On Break" if body.get("busy") else "Available"
-    ok, status = bridge.set_agent_status(seat, target)
-    if not ok:
-        raise HTTPException(status_code=502, detail=status)
-    return {"seat": seat, "status": status}
+    try:
+        status, queue_updated = bridge.set_seat_busy(seat, bool(body.get("busy")))
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"seat": seat, "status": status, "queue_updated": queue_updated}
 
 
 @app.get("/desk/records")
