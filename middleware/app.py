@@ -170,6 +170,9 @@ def export_calls(days: int = 30,
                           f"records_{stamp}.xlsx")
 
 
+
+
+
 TEST_PAGE_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -630,6 +633,17 @@ border-radius:999px;padding:5px 10px;font-size:13px;margin:0 6px 6px 0}
 border-radius:999px;padding:5px 12px;font-size:13px;margin:0 6px 6px 0;cursor:pointer;font-family:inherit}
 #tagChips{margin-top:2px}
 #tagSuggest{margin-top:10px}
+.export-modal{position:fixed;inset:0;background:rgba(20,30,50,.45);backdrop-filter:blur(6px);z-index:200;display:flex;align-items:flex-start;justify-content:center;padding:6vh 16px;overflow:auto}
+.export-panel{width:min(860px,100%);max-height:88vh;overflow:auto}
+.export-table{width:100%;border-collapse:collapse;font-size:13px}
+.export-table th,.export-table td{padding:6px 8px;border-bottom:1px solid rgba(0,0,0,.08);text-align:left;vertical-align:top}
+@media print{
+body *{visibility:hidden}
+#exportModal,#exportModal *{visibility:visible}
+#exportModal{position:absolute;inset:0;padding:0;background:none;backdrop-filter:none}
+#exportModal .export-actions,#exportModal .export-close{display:none}
+#exportModal .export-panel{box-shadow:none;max-height:none;width:100%}
+}
 """
 
 
@@ -731,8 +745,8 @@ def desk_page_html(seat: str) -> str:
         <input type="hidden" id="fKind" value="">
         <div class="date-field"><input id="fDate" type="text" placeholder="按日期筛选" readonly onclick="openDatePicker(this)"><span class="date-chev">▾</span></div>
         <button class="btn btn-sm" onclick="searchList()">搜索</button>
-        <span style="color:var(--muted);font-size:13px">导出最近</span><input id="fDays" type="text" inputmode="numeric" value="30" title="导出天数"><span style="color:var(--muted);font-size:13px">天</span>
-        <button class="btn btn-sm btn-ghost" onclick="exportXlsx()">导出 Excel</button>
+        <span style="color:var(--muted);font-size:13px">导出最近</span><input id="fDays" type="text" inputmode="numeric" value="30" title="导出天数" style="width:64px"><span style="color:var(--muted);font-size:13px">天</span>
+        <button class="btn btn-sm btn-ghost" onclick="openExportPreview()">导出</button>
       </div>
       <div id="list"><div class="empty">加载中…</div></div>
       <div class="pager">
@@ -770,6 +784,20 @@ def desk_page_html(seat: str) -> str:
           <div class="stat stat-purple"><b id="statVm">–</b><span>分派留言</span></div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+<div id="exportModal" class="export-modal" style="display:none" onclick="if(event.target===this)closeExportPreview()">
+  <div class="export-panel card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0">导出预览</h2>
+      <button class="btn btn-sm btn-ghost export-close" onclick="closeExportPreview()">关闭</button>
+    </div>
+    <div id="exportMeta" style="color:var(--muted);font-size:13px;margin:10px 0"></div>
+    <div id="exportList" style="max-height:60vh;overflow:auto"></div>
+    <div class="export-actions" style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-sm" onclick="printExportPreview()">打印</button>
+      <button class="btn btn-sm btn-ghost" onclick="downloadExportPreview()">下载</button>
     </div>
   </div>
 </div>
@@ -879,12 +907,44 @@ function changePage(step) {
   offset = Math.max(0, offset + step * 50);
   refreshList();
 }
-function exportXlsx() {
+var exportDays = 30;
+function readExportDays() {
   var days = parseInt($("fDays").value, 10);
   if (!days || days < 1) days = 30;
   if (days > 365) days = 365;
-  location.href = "/desk/export.xlsx?days=" + days;
+  $("fDays").value = days;
+  exportDays = days;
+  return days;
 }
+async function openExportPreview() {
+  var days = readExportDays();
+  $("exportMeta").textContent = "正在加载…";
+  $("exportList").innerHTML = "";
+  $("exportModal").style.display = "flex";
+  try {
+    var r = await api("/desk/export-preview?days=" + days);
+    var d = await r.json();
+    var note = "最近 " + d.days + " 天，共 " + d.total + " 条";
+    if (d.total > d.rows.length) note += "（预览显示前 " + d.rows.length + " 条，下载含全部）";
+    note += "；下载的 Excel 另含录音文件、通话ID 列。";
+    $("exportMeta").textContent = note;
+    if (!d.rows.length) { $("exportList").innerHTML = '<div class="empty">这段时间没有记录</div>'; return; }
+    var cols = ["登记时间", "联系电话", "客服人员", "通话时长", "服务途径", "服务类型", "通话内容"];
+    var html = '<table class="export-table"><tr>' + cols.map(function(c) { return "<th>" + c + "</th>"; }).join("") + "</tr>";
+    html += d.rows.map(function(row) {
+      return "<tr>" + cols.map(function(c) { return "<td>" + esc(row[c] == null ? "" : String(row[c])) + "</td>"; }).join("") + "</tr>";
+    }).join("") + "</table>";
+    $("exportList").innerHTML = html;
+  } catch (e) {
+    if (e && e.message === "unauth") return;
+    $("exportMeta").textContent = "加载失败";
+    $("exportList").innerHTML = '<div class="empty">加载失败 <button class="btn btn-sm btn-ghost" onclick="openExportPreview()">重试</button></div>';
+  }
+}
+function closeExportPreview() { $("exportModal").style.display = "none"; }
+function printExportPreview() { window.print(); }
+function downloadExportPreview() { location.href = "/desk/export.xlsx?days=" + exportDays; }
+document.addEventListener("keydown", function(e) { if (e.key === "Escape") closeExportPreview(); });
 var pickerState = null, audioObj = null;
 function openDatePicker(input) {
   if (pickerState && pickerState.input === input) { closeDatePicker(); return; }
@@ -1465,6 +1525,20 @@ def desk_export(request: Request, days: int = 30):
     stamp = datetime.now().strftime("%Y%m%d")
     return _xlsx_response(build_xlsx([("通话记录", CALL_COLUMNS, rows)]),
                           f"records_{stamp}.xlsx")
+
+
+@app.get("/desk/export-preview")
+def desk_export_preview(request: Request, days: int = 30):
+    """JSON preview for the export dialog: same record set as the .xlsx
+    download (same days clamp), capped at 500 rows for display; the
+    download itself is uncapped."""
+    require_seat(request)
+    days = max(1, min(days, 365))
+    start = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    rows = [call_row(r) for r in bridge.store.list_calls(start)]
+    names = [c[0] for c in CALL_COLUMNS]
+    return {"days": days, "total": len(rows),
+            "rows": [dict(zip(names, r)) for r in rows[:500]]}
 
 
 # Old bookmarks keep working: everything now lives on the desk.
