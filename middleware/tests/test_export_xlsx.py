@@ -119,6 +119,30 @@ class TestRowBuilders(unittest.TestCase):
         self.assertEqual(vm[3], "0分08秒")
         self.assertEqual(vm[8], "20261024-080000-8002")
 
+    def test_workbook_rels_and_sst_count(self):
+        # Regression: a workbook whose rels lack styles/sharedStrings
+        # renders every string cell blank in strict readers (LibreOffice
+        # converted such a file to an empty CSV), even though the strings
+        # are present in sharedStrings.xml.
+        import io
+        import xml.etree.ElementTree as ET
+        import zipfile
+        rows = [
+            ["2026-10-28 10:00:00", "13800000000", "8001"],
+            ["2026-10-28 10:05:00", "13800000000", "8001"],
+        ]
+        data = build_xlsx([("records", [("A", 10), ("B", 10), ("C", 10)],
+                            rows)])
+        z = zipfile.ZipFile(io.BytesIO(data))
+        rels = z.read("xl/_rels/workbook.xml.rels").decode()
+        self.assertIn("styles.xml", rels)
+        self.assertIn("sharedStrings.xml", rels)
+        sst = ET.fromstring(z.read("xl/sharedStrings.xml"))
+        # 3 header cells + 6 data cells = 9 refs; 3 headers + 4 distinct
+        # data values = 7 unique strings. count must be the total.
+        self.assertEqual(sst.get("count"), "9")
+        self.assertEqual(sst.get("uniqueCount"), "7")
+
     def test_format_ts_edge_cases(self):
         self.assertEqual(format_ts(0), "")
         self.assertEqual(format_ts(""), "")

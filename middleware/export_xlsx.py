@@ -151,9 +151,11 @@ def build_xlsx(sheets: list) -> bytes:
     """
     strings: list[str] = []
     str_index: dict[str, int] = {}
+    ref_total = [0]
 
     def sref(value) -> int:
         text = _clean(value)
+        ref_total[0] += 1
         if text not in str_index:
             str_index[text] = len(strings)
             strings.append(text)
@@ -200,7 +202,7 @@ def build_xlsx(sheets: list) -> bytes:
     sst = "".join(f"<si><t>{escape(s)}</t></si>" for s in strings)
     shared = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
               f'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-              f'count="{len(strings)}" uniqueCount="{len(strings)}">{sst}</sst>')
+              f'count="{ref_total[0]}" uniqueCount="{len(strings)}">{sst}</sst>')
 
     overrides = "".join(
         f'<Override PartName="/xl/worksheets/sheet{i + 1}.xml" '
@@ -214,6 +216,17 @@ def build_xlsx(sheets: list) -> bytes:
         f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
         f'Target="worksheets/sheet{i + 1}.xml"/>'
         for i in range(len(sheets)))
+    # Strict readers (LibreOffice, Numbers) locate the style table and the
+    # shared-string pool through these relationships; without them every
+    # string cell renders blank even though the strings are in the file.
+    n = len(sheets)
+    rels += (
+        f'<Relationship Id="rId{n + 1}" '
+        f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        f'Target="styles.xml"/>'
+        f'<Relationship Id="rId{n + 2}" '
+        f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" '
+        f'Target="sharedStrings.xml"/>')
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
