@@ -880,10 +880,10 @@ font-size:14px;cursor:pointer;flex-shrink:0;box-shadow:0 4px 12px rgba(0,122,255
 border-radius:16px;padding:10px 12px;margin:10px 0}
 .user-box .tag-chip{padding:4px 8px;font-size:12px}
 .user-box .tag-sug{padding:4px 10px;font-size:12px}
-.meta-strip{display:flex;gap:24px;align-items:center;background:rgba(120,120,128,.08);
-border-radius:12px;padding:8px 14px;margin:12px 0;font-size:13px}
-.meta-strip span{color:var(--muted)}
-.meta-strip b{color:#000;font-size:14px;font-weight:600}
+.tag-row{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}
+.tag-row>*{flex:1;min-width:180px}
+.tag-box{margin:0}
+.tag-box input{flex:1;min-width:0}
 .tag-chip{display:inline-flex;align-items:center;gap:4px;background:#007aff;color:#fff;
 border-radius:999px;padding:5px 10px;font-size:13px;margin:0 6px 6px 0}
 .tag-chip button{border:0;background:transparent;color:#fff;font-size:14px;cursor:pointer;line-height:1;padding:0 2px}
@@ -1388,15 +1388,16 @@ async function openRecord(id) {
       ? "<button class='btn btn-ghost' id='notesBtn' style='margin-top:12px' onclick='editNotes()'>修改</button> "
       : "<button class='btn' id='notesBtn' style='margin-top:12px' onclick='saveNotes()'>保存</button> ") +
     "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span></div>" +
-    '<div class="meta-strip"><span>客服人员 <b>' + esc(d.agent || d.owner_seat || "—") + "</b></span>" +
-    '<span>通话时长 <b>' + esc(d.duration) + "</b></span></div>" +
-    '<div class="user-box">' +
+    '<div class="tag-row">' +
+    '<div class="user-box tag-box">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
     '<span style="font-weight:600">用户标签</span></div>' +
     '<div id="tagChips"></div>' +
     '<div style="display:flex;gap:8px;margin-top:6px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}\">' +
     '<button class="btn btn-sm" id="addTagBtn" onclick="addTag()">添加</button></div>' +
     '<div id="tagSuggest"></div></div>' +
+    '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
+    '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div></div>" +
     '<div class="meta-item" style="margin-top:10px"><div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--muted);font-size:12px">录音</span><span class="mono" style="color:var(--muted);font-size:12px">通话ID ' + esc(d.display_id || d.call_id) + '</span></div>' +
     '<div style="margin-top:6px">' + audio + '</div></div>';
   // can_edit is explicit-false only when the backend says another seat
