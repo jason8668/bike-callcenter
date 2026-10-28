@@ -64,4 +64,8 @@ COPY *.lua /usr/share/freeswitch/scripts/
 # security-group rules (UDP 5060 + UDP 16384-16884).
 EXPOSE 5060/udp 5060/tcp 8021/tcp
 
-CMD ["freeswitch", "-nonat", "-nc"]
+# -nf (foreground) is REQUIRED in a container: without it FreeSWITCH
+# daemonizes, PID 1 exits, and Docker restarts the container in a loop
+# (log tail fills with repeated "Backgrounding." and fs_cli never
+# answers). -nc alone does not keep it in the foreground.
+CMD ["freeswitch", "-nonat", "-nf"]
