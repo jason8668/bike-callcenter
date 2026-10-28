@@ -97,7 +97,39 @@ class TestBridge(unittest.TestCase):
         self.assertFalse(hist["rows"][1]["via_card"])
         self.assertTrue(all(r["recording_file"] for r in hist["rows"]))
         self.assertEqual(self.bridge.caller_history(999999),
-                         {"total": 0, "rows": []})
+                         {"total": 0, "rows": [],
+                          "portrait": self.bridge.store.caller_portrait(
+                              "", "")})
+
+    def test_caller_portrait_aggregates_full_history(self):
+        out1 = self.bridge.handle_cdr(dict(CDR))  # 138, answered
+        self.bridge.handle_cdr(dict(CDR, uuid="b2", billsec="0",
+                                    duration="5"))  # same caller, missed
+        out3 = self.bridge.handle_cdr(dict(
+            CDR, uuid="c3", caller_id_number="13900000000"))
+        out_cur = self.bridge.handle_cdr(dict(CDR, uuid="cur1"))
+        self.bridge.store.set_notes(out1["record_id"], "锁桩打不开", "锁桩故障")
+        self.bridge.store.set_notes(out3["record_id"], "还车失败", "还车异常")
+        self.bridge.store.set_notes(out_cur["record_id"], "当前通话", "锁桩故障")
+        self.bridge.store.set_record_card(out3["record_id"], "K100")
+        self.bridge.store.set_record_card(out_cur["record_id"], "K100")
+        p = self.bridge.store.caller_portrait("13800000000", "K100", "cur1")
+        self.assertEqual(p["total"], 3)
+        self.assertEqual(p["by_kind"], {"电话": 2, "未接": 1, "留言": 0})
+        self.assertEqual(p["top_types"],
+                         [{"type": "还车异常", "count": 1},
+                          {"type": "锁桩故障", "count": 1}])
+        self.assertEqual(p["last"]["kind"], "电话")
+        self.assertEqual(p["last"]["service_type"], "还车异常")
+        self.assertEqual(p["via_card"], 1)
+        self.assertTrue(p["first_time"])
+        hist = self.bridge.caller_history(out_cur["record_id"])
+        self.assertEqual(hist["portrait"]["total"], 3)
+        self.assertEqual(self.bridge.store.caller_portrait("", ""),
+                         {"total": 0,
+                          "by_kind": {"电话": 0, "未接": 0, "留言": 0},
+                          "first_time": "", "last": None, "top_types": [],
+                          "via_card": 0})
 
     def test_duplicate_cdr_is_idempotent(self):
         first = self.bridge.handle_cdr(CDR)
@@ -298,6 +330,38 @@ class TestVoicemailDistribution(unittest.TestCase):
             "8003|callback|user/8003|Available|Waiting\n")
         out = self.bridge.handle_voicemail({**VM, "uuid": "vm-busy"})
         self.assertEqual(out["owner_seat"], "8002")
+
+    def test_queue_available_without_login_shows_logged_out(self):
+        import bridge_core
+        self._orig_esl = bridge_core.esl_command
+        self.addCleanup(setattr, bridge_core, "esl_command",
+                        self._orig_esl)
+        all_available = (
+            "name|type|contact|status|state\n"
+            "8001|callback|user/8001|Available|Waiting\n"
+            "8002|callback|user/8002|Available|Waiting\n"
+            "8003|callback|user/8003|Available|Waiting\n")
+        bridge_core.esl_command = lambda cmd: all_available
+        # Only 8001 has a live desk session; 8002/8003 never logged in.
+        self.bridge.store.create_session("8001")
+        statuses, connected = self.bridge.statuses_with_source()
+        self.assertTrue(connected)
+        self.assertEqual(statuses["8001"], "Available")
+        self.assertEqual(statuses["8002"], "Logged Out")
+        self.assertEqual(statuses["8003"], "Logged Out")
+        # An in-call seat proves presence by itself.
+        bridge_core.esl_command = lambda cmd: (
+            "name|type|contact|status|state\n"
+            "8001|callback|user/8001|Available|In Call\n"
+            "8002|callback|user/8002|Available|Waiting\n"
+            "8003|callback|user/8003|Available|Waiting\n")
+        statuses, _ = self.bridge.statuses_with_source()
+        self.assertEqual(statuses["8001"], "On Call")
+        # Desk busy wins even when the queue says Available.
+        self.bridge.store.set_busy_flag("8001", True)
+        bridge_core.esl_command = lambda cmd: all_available
+        statuses, _ = self.bridge.statuses_with_source()
+        self.assertEqual(statuses["8001"], "On Break")
 
     def test_all_busy_leaves_record_unowned(self):
         import bridge_core

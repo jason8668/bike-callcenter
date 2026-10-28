@@ -1012,7 +1012,8 @@ def desk_page_html(seat: str) -> str:
     </div>
     <div class="right-col">
       <div class="card">
-        <h2>该客户历史</h2>
+        <h2>客户画像</h2>
+        <div id="customerPortrait"><span style="color:var(--muted)">打开一条记录后显示该客户的画像。</span></div>
         <div id="callerHistory"><span style="color:var(--muted)">打开一条记录后显示该客户的历史。</span></div>
         <audio id="histAudio" controls style="width:100%;display:none;margin-top:8px"></audio>
       </div>
@@ -1335,17 +1336,12 @@ async function openRecord(id) {
       '<div class="audio-track" onclick="seekAudio(event)"><div class="audio-fill" id="audioFill"></div></div>' +
       '<span class="audio-time" id="audioTime">0:00 / 0:00</span></div>'
     : '<div style="color:var(--muted)">无录音</div>';
-  // Always render the hint container (hidden when empty) so saving
-  // a card number can reveal card-linked history without a reload.
-  var hint = '<div class="msg msg-info" id="histHint"' +
-    (d.history_hint ? "" : ' style="display:none"') + ">" +
-    esc(d.history_hint || "") + "</div>";
   // Saved content is the lock: a record with a service type or a
   // question opens read-only (已登记）; 修改 unlocks it for editing,
   // and saving locks it again. Empty records stay editable.
   var locked = !!(d.service_type || (d.question && d.question.trim()));
   var dis = locked ? " disabled" : "";
-  $("detail").innerHTML = "<h2>记录详情</h2>" + hint +
+  $("detail").innerHTML = "<h2>记录详情</h2>" +
     '<div class="detail-head"><span class="detail-caller">' + esc(d.caller) + "</span>" +
     kindPill(d.kind) + '<span class="detail-time">' + esc(d.time) + "</span></div>" +
     '<div class="notes-box">' +
@@ -1360,23 +1356,12 @@ async function openRecord(id) {
       ? "<button class='btn btn-ghost' id='notesBtn' style='margin-top:12px' onclick='editNotes()'>修改</button> "
       : "<button class='btn' id='notesBtn' style='margin-top:12px' onclick='saveNotes()'>保存</button> ") +
     "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span></div>" +
-    '<div class="user-box">' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
-    '<span style="font-weight:600">用户信息</span></div>' +
-    "<label>用户卡号</label>" +
-    '<div style="display:flex;gap:8px"><input id="fCard" value="' + attrEsc(d.card || "") + '" placeholder="输入用户卡号">' +
-    '<button class="btn btn-sm" onclick="saveCard()">保存卡号</button></div>' +
-    '<div id="cardMsg" style="color:var(--muted);font-size:13px;margin-top:4px"></div>' +
-    "<label>用户标签</label>" +
-    '<div id="tagChips"></div>' +
-    '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}">' +
-    '<button class="btn btn-sm" onclick="addTag()">添加</button></div>' +
-    '<div id="tagSuggest"></div></div>' +
     '<div class="meta-grid">' +
     '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
     '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>通话ID</span><b class="mono">' + esc(d.display_id || d.call_id) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>录音</span>' + audio + "</div></div>";
+  renderPortrait(d.history, d.card);
   currentDefaults = d.default_tags || [];
   renderTagChips(d.tags || []);
   var attached = {};
@@ -1384,6 +1369,61 @@ async function openRecord(id) {
   renderTagSuggest(d.frequent_tags || [], currentDefaults, attached);
   renderCallerHistory(d.history);
   try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
+}
+function portraitUserBox(card) {
+  return '<div class="user-box">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+    '<span style="font-weight:600">卡号与标签</span></div>' +
+    "<label>用户卡号</label>" +
+    '<div style="display:flex;gap:8px"><input id="fCard" value="' + attrEsc(card || "") + '" placeholder="输入用户卡号">' +
+    '<button class="btn btn-sm" onclick="saveCard()">保存卡号</button></div>' +
+    '<div id="cardMsg" style="color:var(--muted);font-size:13px;margin-top:4px"></div>' +
+    "<label>用户标签</label>" +
+    '<div id="tagChips"></div>' +
+    '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}">' +
+    '<button class="btn btn-sm" onclick="addTag()">添加</button></div>' +
+    '<div id="tagSuggest"></div></div>';
+}
+function daysAgoText(dateStr) {
+  var s = (dateStr || "").slice(0, 10);
+  var d = new Date(s + "T00:00:00");
+  if (isNaN(d.getTime())) return "";
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var diff = Math.round((today - d) / 86400000);
+  if (diff <= 0) return "今天";
+  if (diff === 1) return "昨天";
+  return diff + " 天前";
+}
+function portraitLine(label, value) {
+  return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:13px;padding:3px 0">' +
+    '<span style="color:var(--muted);flex:none">' + esc(label) + '</span>' +
+    '<b style="text-align:right">' + value + '</b></div>';
+}
+function renderPortrait(h, card) {
+  var box = $("customerPortrait");
+  if (!box) return;
+  var p = (h && h.portrait) || null;
+  if (!p || !p.total) {
+    box.innerHTML = '<div style="color:var(--muted);font-size:13px;margin-bottom:8px">该客户暂无历史记录。</div>' + portraitUserBox(card);
+    return;
+  }
+  var bk = p.by_kind || {};
+  var html = portraitLine("累计来电", p.total + " 次（电话 " + (bk["电话"] || 0) + " · 未接 " + (bk["未接"] || 0) + " · 留言 " + (bk["留言"] || 0) + "）");
+  if (p.first_time) html += portraitLine("首次联系", esc(p.first_time.slice(0, 10)));
+  if (p.last) {
+    var ago = daysAgoText(p.last.time);
+    html += portraitLine("最近联系", esc(p.last.kind) + "（" + esc(p.last.time.slice(0, 10)) + (ago ? "，" + ago : "") + "）");
+  }
+  if (p.top_types && p.top_types.length) {
+    html += portraitLine("常见问题", esc(p.top_types.map(function(t) { return t.type + "×" + t.count; }).join("、")));
+  }
+  if (p.last && (p.last.service_type || p.last.question)) {
+    var lastNote = esc(p.last.service_type || "");
+    if (p.last.question) lastNote += (lastNote ? " · " : "") + esc(p.last.question);
+    html += portraitLine("上次反映", lastNote);
+  }
+  if (p.via_card) html += portraitLine("同卡他号来电", p.via_card + " 次");
+  box.innerHTML = html + '<div style="height:8px"></div>' + portraitUserBox(card);
 }
 function renderCallerHistory(h) {
   var box = $("callerHistory");
@@ -1470,12 +1510,8 @@ async function saveCard() {
   });
   if (!r.ok) { $("cardMsg").textContent = "保存失败"; return; }
   var d = await r.json();
+  if (d.history) { renderPortrait(d.history, d.card); renderCallerHistory(d.history); }
   $("cardMsg").textContent = d.card ? "已保存：卡号已关联到该号码" : "已清空：该号码的卡号关联已取消";
-  if (d.history_hint) {
-    var hint = $("histHint");
-    if (hint) { hint.textContent = d.history_hint; hint.style.display = "block"; }
-  }
-  if (d.history) renderCallerHistory(d.history);
 }
 function editNotes() {
   $("fService").disabled = false;

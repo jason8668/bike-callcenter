@@ -698,6 +698,59 @@ class CallStore:
             "via_card": bool(phone and r[1] != phone),
         } for r in rows]
 
+    def caller_portrait(self, phone: str, card: str = "",
+                        exclude_call_id: str = "") -> dict:
+        """Full-history aggregate for the desk portrait card: same
+        number-or-card scope as caller_history_rows but over ALL past
+        records (no limit), so counts and top issues are exact, not
+        limited to the latest 10 rail rows."""
+        empty = {"total": 0, "by_kind": {"电话": 0, "未接": 0, "留言": 0},
+                 "first_time": "", "last": None, "top_types": [],
+                 "via_card": 0}
+        if not phone and not card:
+            return empty
+        if card:
+            where = ("is_record=1 AND call_id != ? AND"
+                     " (caller=? OR card_no=? OR caller IN"
+                     " (SELECT phone FROM caller_cards WHERE card=?))")
+            args: tuple = (exclude_call_id, phone, card, card)
+        else:
+            where = "is_record=1 AND call_id != ? AND caller=?"
+            args = (exclude_call_id, phone)
+        with self._conn() as c:
+            total = c.execute("SELECT COUNT(*) FROM calls WHERE " + where,
+                              args).fetchone()[0]
+            if not total:
+                return empty
+            by_kind = {"电话": 0, "未接": 0, "留言": 0}
+            for kind, n in c.execute(
+                    "SELECT kind, COUNT(*) FROM calls WHERE " + where +
+                    " GROUP BY kind", args).fetchall():
+                by_kind[kind or "电话"] = n
+            first = c.execute("SELECT MIN(start_epoch) FROM calls WHERE " +
+                              where, args).fetchone()[0]
+            last = c.execute(
+                "SELECT kind, start_epoch, service_type, question"
+                " FROM calls WHERE " + where + " ORDER BY rowid DESC"
+                " LIMIT 1", args).fetchone()
+            top = c.execute(
+                "SELECT service_type, COUNT(*) FROM calls WHERE " + where +
+                " AND service_type != '' GROUP BY service_type"
+                " ORDER BY COUNT(*) DESC, service_type ASC LIMIT 5",
+                args).fetchall()
+            via = c.execute(
+                "SELECT COUNT(*) FROM calls WHERE " + where +
+                " AND caller != ?", (*args, phone)).fetchone()[0] if card \
+                else 0
+        return {"total": total, "by_kind": by_kind,
+                "first_time": fmt_cst(first or 0),
+                "last": ({"kind": last[0] or "电话",
+                          "time": fmt_cst(last[1] or 0),
+                          "service_type": last[2] or "",
+                          "question": last[3] or ""} if last else None),
+                "top_types": [{"type": t, "count": n} for t, n in top],
+                "via_card": via}
+
     def list_records(self, caller: str = "", agent: str = "", kind: str = "",
                      date_from: str = "", date_to: str = "",
                      limit: int = 50, offset: int = 0) -> list[dict]:
@@ -946,12 +999,32 @@ class Bridge:
     def statuses_with_source(self) -> tuple[dict, bool]:
         """(seat -> status, queue_connected). When the queue answers,
         its statuses are the routing truth (they include phone-side
-        *51/*52 busy). When it does not answer, statuses fall back
-        to system login state, so a logged-in agent still shows
-        online instead of 'unknown'."""
+        *51/*52 busy) — but routing truth is not presence: a seat
+        the queue lists Available has nobody at the desk unless a
+        desk session is live. So the queue status is merged with
+        login state: an in-call seat stays On Call (the call itself
+        proves presence), On Break wins from either side, and a seat
+        with no live desk session shows Logged Out even when the
+        queue still lists it Available (its static config value).
+        When the queue does not answer, statuses fall back to system
+        login state entirely."""
         esl = self._agent_statuses()
         if esl:
-            return {a: esl.get(a, "unknown") for a in self.rotation_agents}, True
+            live = self.store.seats_with_live_sessions()
+            out = {}
+            for a in self.rotation_agents:
+                fs = esl.get(a)
+                if fs == "On Call":
+                    out[a] = "On Call"
+                elif fs == "On Break" or self.store.get_busy_flag(a):
+                    out[a] = "On Break"
+                elif fs == "Logged Out" or a not in live:
+                    out[a] = "Logged Out"
+                elif fs == "Available":
+                    out[a] = "Available"
+                else:
+                    out[a] = self.seat_web_status(a)
+            return out, True
         return {a: self.seat_web_status(a) for a in self.rotation_agents}, False
 
     def get_agent_statuses(self) -> dict:
@@ -1093,13 +1166,17 @@ class Bridge:
 
     def caller_history(self, rowid: int, limit: int = 10) -> dict:
         """History rail payload for a record: its number-or-card past
-        records, newest first, excluding itself."""
+        records, newest first, excluding itself, plus the full-history
+        portrait aggregate for the portrait card."""
         rec = self.store.get_record(rowid)
         if not rec:
-            return {"total": 0, "rows": []}
+            return {"total": 0, "rows": [],
+                    "portrait": self.store.caller_portrait("", "")}
         total, rows = self.store.caller_history_rows(
             rec["caller"], rec["card"], rec["call_id"], limit)
-        return {"total": total, "rows": rows}
+        portrait = self.store.caller_portrait(
+            rec["caller"], rec["card"], rec["call_id"])
+        return {"total": total, "rows": rows, "portrait": portrait}
 
     def handle_event(self, event: str, payload: dict) -> dict:
         rec = parse_cdr(payload)
