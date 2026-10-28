@@ -11,14 +11,14 @@ services:
     env_file:
       - ../middleware/.env
     mem_limit: 256m
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      # Published on 8890 so the /test page (simulated call trigger) is
-      # reachable from the operator's browser during trials without an
-      # IPPBX. All POST endpoints require the X-Bridge-Secret header.
-      # Phase 2: FreeSWITCH on the same host posts events/CDR here too.
-      - "8890:8090"
+    # Host networking is REQUIRED, not a convenience: FreeSWITCH's event
+    # socket listens on the host loopback (127.0.0.1:8021), and a
+    # loopback listener refuses connections aimed at the Docker gateway
+    # IP that host.docker.internal resolves to from a container. Sharing
+    # the host network makes 127.0.0.1:8021 reachable, and uvicorn
+    # listens on 8890 directly, so the desk URL stays http://server:8890/.
+    # (No ports mapping in host mode; it would be ignored.)
+    network_mode: host
     volumes:
       - bridge-data:/data
       # Recordings directory (writable: simulated calls write their WAV

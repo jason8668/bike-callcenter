@@ -27,11 +27,15 @@ from typing import Optional
 
 def esl_command(command: str) -> Optional[str]:
     """One FreeSWITCH event-socket API call (stdlib socket, no deps).
-    The socket binds 127.0.0.1 on the host; from the bridge container it
-    is reachable at host.docker.internal:8021. The password comes from
-    ESL_PASSWORD, else the server-side freeswitch/esl-password.txt
-    mounted read-only at /freeswitch-config (never in Git). Any failure
-    (no socket, bad auth, timeout) yields None so callers fall back."""
+    The socket binds 127.0.0.1 on the host and the bridge runs with host
+    networking, so it connects to 127.0.0.1:8021 directly. (A container
+    on the Docker bridge cannot reach a loopback listener via
+    host.docker.internal: the gateway IP is not loopback, so the
+    connection is refused even though FreeSWITCH is up.) The password
+    comes from ESL_PASSWORD, else the server-side
+    freeswitch/esl-password.txt mounted read-only at /freeswitch-config
+    (never in Git). Any failure (no socket, bad auth, timeout) yields
+    None so callers fall back."""
     import socket
     password = os.environ.get("ESL_PASSWORD", "")
     if not password:
@@ -42,7 +46,7 @@ def esl_command(command: str) -> Optional[str]:
             password = ""
     if not password:
         return None
-    host = os.environ.get("ESL_HOST", "host.docker.internal")
+    host = os.environ.get("ESL_HOST", "127.0.0.1")
     try:
         port = int(os.environ.get("ESL_PORT", "8021"))
     except ValueError:

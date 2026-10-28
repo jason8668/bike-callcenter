@@ -1,6 +1,6 @@
 """Record service entrypoint (FastAPI).
 
-Run: uvicorn app:app --host 0.0.0.0 --port 8090
+Run: uvicorn app:app --host 0.0.0.0 --port 8890
 Env: see .env.example. All secrets live in .env only, never in Git.
 
 This is a RECORD system, not a ticket system: no Zammad, no workflow.
@@ -716,7 +716,7 @@ def desk_page_html(seat: str) -> str:
     <button class="btn btn-sm btn-ghost" style="float:right"
       onclick="document.getElementById('alert').classList.remove('show')">知道了</button>
   </div>
-  <div id="queueWarn" class="queue-warn">⚠️ 话务层未连接（FreeSWITCH 还没装好）：下面坐席状态是按系统登录状态显示的（登录即空闲，置忙即置忙）；电话实际分流要等话务层装好后才生效。记录、补填、导出都正常。</div>
+  <div id="queueWarn" class="queue-warn">⚠️ 话务层未连接：下面坐席状态是按系统登录状态显示的（登录即空闲，置忙即置忙）；电话实际分流要等话务层恢复后才生效。记录、补填、导出都正常。</div>
   <div class="grid">
     <div class="card list-col">
       <h2>通话记录</h2>
@@ -731,7 +731,7 @@ def desk_page_html(seat: str) -> str:
         <input type="hidden" id="fKind" value="">
         <div class="date-field"><input id="fDate" type="text" placeholder="按日期筛选" readonly onclick="openDatePicker(this)"><span class="date-chev">▾</span></div>
         <button class="btn btn-sm" onclick="searchList()">搜索</button>
-        <input id="fDays" type="text" inputmode="numeric" value="30" title="导出天数">
+        <span style="color:var(--muted);font-size:13px">导出最近</span><input id="fDays" type="text" inputmode="numeric" value="30" title="导出天数"><span style="color:var(--muted);font-size:13px">天</span>
         <button class="btn btn-sm btn-ghost" onclick="exportXlsx()">导出 Excel</button>
       </div>
       <div id="list"><div class="empty">加载中…</div></div>
@@ -751,7 +751,7 @@ def desk_page_html(seat: str) -> str:
         <div class="seat-note">状态由登录自动决定，不用选也不能改别人的：登录即空闲，自己置忙变置忙，退出变离线。</div>
       </div>
       <div class="card">
-        <h2>我的统计与历史</h2>
+        <h2>我的统计</h2>
         <div class="seg" id="statRangeSeg">
           <button type="button" data-range="today" class="on">今日</button>
           <button type="button" data-range="week">本周</button>
@@ -769,7 +769,6 @@ def desk_page_html(seat: str) -> str:
           <div class="stat stat-blue"><b id="statCalls">–</b><span>接听</span></div>
           <div class="stat stat-purple"><b id="statVm">–</b><span>分派留言</span></div>
         </div>
-        <div id="history"><div class="empty">加载中…</div></div>
       </div>
     </div>
   </div>
@@ -831,13 +830,9 @@ async function refreshMe() {
   $("statVm").textContent = d.stats.voicemails;
   $("rangeLabel").textContent = d.range_label;
   $("queueWarn").classList.toggle("show", !d.queue_connected);
-  $("history").innerHTML = d.history.length ? d.history.map(function(h) {
-    return '<div class="hist">' + kindPill(h.kind) + " " + esc(h.caller) + " · " + esc(h.duration) +
-      '<span class="t">　' + esc(h.time) + '</span></div>';
-  }).join("") : '<div class="empty">暂无历史记录</div>';
   } catch (e) {
     if (e && e.message === "unauth") return;  // api() already redirects to /login
-    $("history").innerHTML = '<div class="empty">加载失败 <button class="btn btn-sm btn-ghost" onclick="refreshMe()">重试</button></div>';
+    $("rangeLabel").textContent = "统计加载失败，下次刷新自动重试";
   }
 }
 async function refreshSeats() {
