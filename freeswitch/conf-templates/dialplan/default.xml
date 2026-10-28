@@ -52,6 +52,20 @@
       </condition>
     </extension>
 
+    <!-- TEST-ONLY agent leg for the /test FS console (no real phone):
+         the bridge adds a temporary queue agent whose contact is
+         loopback/8999. The queue calls it like a real seat; it answers
+         immediately and sleeps while bridged, so the queue bridges the
+         test caller to it and the record-template records the call.
+         Inert unless dialed: nothing in production dials 8999, and the
+         test page removes the agent again on hangup / cleanup. -->
+    <extension name="test-agent">
+      <condition field="destination_number" expression="^8999$">
+        <action application="answer"/>
+        <action application="sleep" data="3600000"/>
+      </condition>
+    </extension>
+
     <!-- Voicemail: record, then the hangup hook posts to the bridge.
          The recording file is named after the CallID so the bridge
          finds it in the shared /recordings volume. -->

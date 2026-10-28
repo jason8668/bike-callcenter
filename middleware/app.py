@@ -5,7 +5,7 @@ Env: see .env.example. All secrets live in .env only, never in Git.
 
 This is a RECORD system, not a ticket system: no Zammad, no workflow.
 Pages: / (login + desk: ONE system for agents), /login, /setup
-(admin seat passwords), /test (simulated calls without a line).
+(admin seat passwords), /test (FreeSWITCH-connected test calls).
 The desk, after login, holds call pop-ups, the record list, record
 detail + notes + audio, the busy toggle, and per-seat stats/history.
 Old /board and /records URLs redirect to /desk.
@@ -18,7 +18,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from bridge_core import Bridge, CallStore, summarize_call_history
+from bridge_core import Bridge, CallStore, esl_command, summarize_call_history
+import fs_test
 from export_xlsx import (CALL_COLUMNS, XLSX_MIME, build_xlsx, call_row,
                           display_call_id)
 
@@ -179,7 +180,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>模拟来电测试 - 自行车客服系统</title>
+<title>FreeSWITCH 真实通话测试 - 自行车客服系统</title>
 <style>
   body { font-family: -apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
          margin: 0; padding: 24px 16px; color: #1c1c1e; background: #f5f5f7; -webkit-font-smoothing: antialiased; }
@@ -204,6 +205,10 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
   button:active { transform: scale(.97); }
   button:disabled { background: #999; box-shadow: none; }
   #result, #vm_result { margin-top: 18px; padding: 12px 14px; border-radius: 14px; display: none; font-size: 14px; }
+  #fs_status, #fs_result { margin-top: 18px; padding: 12px 14px; border-radius: 14px; display: none; font-size: 14px; }
+  .btnrow { display: flex; gap: 10px; }
+  .btnrow button { flex: 1; width: auto; margin-top: 12px; }
+  #fsraw { display: none; margin-top: 14px; padding: 12px; border-radius: 12px; background: rgba(0,0,0,.05); font-size: 12px; white-space: pre-wrap; word-break: break-all; }
   .ok { background: rgba(52,199,123,.14); color: #248a3d; }
   .err { background: rgba(255,59,48,.12); color: #d70015; }
   .hint { color: #8a8a8e; font-size: 13px; line-height: 1.6; }
@@ -213,33 +218,32 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="card">
-<h1>模拟来电测试</h1>
-<p class="hint">还没有接电话线路时，用这个页面模拟一通客户来电：系统会像真来电一样
-弹出来电提示，接通时记录就自动弹出来（带电话号码），坐席可以在通话过程中
-记录问题；通话结束后录音自动绑到这条记录上。来电不带任何预分类：记录先
-进入记录列表，由坐席在记录里填写服务类型等信息。</p>
+<h1>FreeSWITCH 真实通话测试</h1>
+<p class="hint">不再发假数据：点拨打后，桥接通过 ESL 指挥 FreeSWITCH 真打一通电话——进 8000 队列、测试坐席接听、录音、话单，全部走真实链路；结果直接出现在客服工作台上。旧版 HTTP 模拟接口 /simulate/* 仍保留（无 FS 环境和实测套件用），本页不再链接它们。</p>
+<p class="hint">使用前：先用坐席账号登录工作台（/），再回到本页拨打；也可以不登录，只看本页的结果记录和 FS 回显。拨打后测试坐席会自动接听；想测留言超时就别挂断，等 60 秒后队列自动转 8009 留言。</p>
 
 <label>客户手机号码</label>
-<input id="caller" value="13800000000">
+<input id="fs_caller" value="13800000000">
 
 <label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
 <input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
 
-<button id="go">发起模拟来电</button>
-<div id="result"></div>
-
-<p class="hint">操作顺序：先用坐席账号登录工作台（/），登录后即自动在线接单，
-再回到本页点按钮，然后切回工作台看弹屏和新记录。</p>
-
-<hr>
-<h1>模拟语音留言</h1>
-<p class="hint">模拟客户在无人接听时留了一条语音留言：系统会生成一条「语音留言」记录，
-留言录音绑在这条记录上。坐席在记录列表里按类型筛选留言处理。</p>
-
-<label>留言客户手机号码</label>
-<input id="vm_caller" value="13900000000">
-<button id="vm_go">模拟留一条语音留言</button>
-<div id="vm_result"></div>
+<div class="btnrow">
+<button id="fs_call">拨打 8000 队列</button>
+<button id="fs_vm" style="background:#1a5fb4">直接拨留言 8009</button>
+</div>
+<div class="btnrow">
+<button id="fs_hangup" style="background:#ff3b30">挂断</button>
+<button id="fs_play" style="background:#34c759">播放测试音频</button>
+</div>
+<div class="btnrow">
+<button id="fs_noagent" style="background:#ff9500">拨打 8000（无坐席）</button>
+<button id="fs_cleanup" style="background:#8a8a8e">清理测试坐席</button>
+</div>
+<div id="fs_status"></div>
+<div id="fs_result"></div>
+<pre id="fsraw"></pre>
+<audio id="fs_audio" controls style="display:none;width:100%;margin-top:12px"></audio>
 
 <hr>
 <h1>导出 Excel</h1>
@@ -257,71 +261,177 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
   const params = new URLSearchParams(location.search);
   const saved = params.get("secret") || localStorage.getItem("bridge_secret") || "";
   if (saved) document.getElementById("secret").value = saved;
-  document.getElementById("go").addEventListener("click", async () => {
-    const btn = document.getElementById("go");
-    const box = document.getElementById("result");
-    const secret = document.getElementById("secret").value.trim();
-    localStorage.setItem("bridge_secret", secret);
-    btn.disabled = true; btn.textContent = "正在模拟来电...";
-    box.style.display = "none";
+  function getSecret() {
+    const s = document.getElementById("secret").value.trim();
+    localStorage.setItem("bridge_secret", s);
+    return s;
+  }
+  function showRaw(steps) {
+    const pre = document.getElementById("fsraw");
+    if (!steps || !steps.length) { pre.style.display = "none"; return; }
+    pre.style.display = "block";
+    pre.textContent = steps.map(function(s) { return "$ " + s.command + "\\n" + s.reply; }).join("\\n\\n");
+  }
+  function showBox(id, ok, html) {
+    const box = document.getElementById(id);
+    box.style.display = "block";
+    box.className = ok ? "ok" : "err";
+    box.innerHTML = html;
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  let fsUuid = "";
+  let pollTimer = null;
+  let popSeen = false;
+  let callHungUp = false;
+  let callLive = false;
+  let lastCaller = "";
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+  function setStatus(html, ok) {
+    showBox("fs_status", ok !== false, html);
+  }
+  async function postJson(path, body) {
+    const resp = await fetch(path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-Bridge-Secret": getSecret()},
+      body: JSON.stringify(body)
+    });
+    return resp.json();
+  }
+  async function refreshResult(final) {
+    if (!lastCaller) return;
     try {
-      const resp = await fetch("/simulate/call", {
-        method: "POST",
-        headers: {"Content-Type": "application/json", "X-Bridge-Secret": secret},
-        body: JSON.stringify({
-          caller_id_number: document.getElementById("caller").value.trim()
-        })
+      const resp = await fetch("/fs-test/result?caller=" + encodeURIComponent(lastCaller), {
+        headers: {"X-Bridge-Secret": getSecret()}
       });
       const data = await resp.json();
-      box.style.display = "block";
-      if (resp.ok && data.record_id) {
-        const link = "/desk?record=" + data.record_id;
-        box.className = "ok";
-        box.innerHTML = "模拟来电完成，记录已生成（编号 " + data.record_id +
-          "）。<br><a href='" + link + "' target='_blank'>点这里打开这条记录</a>" +
-          "<br>录音已绑在这条记录上：" + (data.has_recording ? "是" : "否");
+      const rec = data.record;
+      if (!rec) {
+        if (final) showBox("fs_result", false, "没有找到该号码的记录（接通弹屏未触发，且话单也未生成记录）。");
+        return;
+      }
+      let html = "结果记录：<b>" + esc(rec.caller) + "</b>　" + esc(rec.kind) +
+        "　客服：" + esc(rec.agent || "—") + "　时长：" + esc(rec.duration) +
+        "　时间：" + esc(rec.time) + "　通话ID：" + esc(rec.display_id || rec.call_id);
+      html += "<br><a href=\\"/desk?record=" + rec.record_id + "\\" target=\\"_blank\\">在工作台打开这条记录</a>";
+      if (rec.has_recording) {
+        html += "　<button id=\\"fs_play_rec\\" style=\\"width:auto;margin-top:8px;padding:6px 14px;font-size:14px\\">▶ 播放结果录音</button>";
       } else {
-        box.className = "err";
-        box.textContent = "没有生成记录：" + JSON.stringify(data);
+        html += "<br>录音：暂无文件（未接通的排队呼叫没有录音文件是正常的）。";
+      }
+      if (final && !popSeen && rec.kind === "电话") {
+        html += "<br>接通弹屏：未触发——记录是挂机后由话单生成的，接通时没有弹出（execute_on_answer 在队列语境下可能未触发）。";
+      }
+      showBox("fs_result", true, html);
+      const btn = document.getElementById("fs_play_rec");
+      if (btn) {
+        btn.addEventListener("click", async () => {
+          const audio = document.getElementById("fs_audio");
+          const r = await fetch("/fs-test/recording/" + rec.record_id, {
+            headers: {"X-Bridge-Secret": getSecret()}
+          });
+          if (!r.ok) { setStatus("录音播放失败：HTTP " + r.status, false); return; }
+          const blob = await r.blob();
+          audio.src = URL.createObjectURL(blob);
+          audio.style.display = "block";
+          audio.play();
+        });
+      }
+      if (!final && callLive && rec.kind === "电话" && rec.agent) {
+        popSeen = true;
+        setStatus("通话中（接通弹屏：已触发，记录已在接通时弹出）。", true);
       }
     } catch (e) {
-      box.style.display = "block"; box.className = "err";
-      box.textContent = "请求失败：" + e;
+      if (final) showBox("fs_result", false, "查结果记录失败：" + e);
     }
-    btn.disabled = false; btn.textContent = "发起模拟来电";
+  }
+  function startPoll() {
+    stopPoll();
+    pollTimer = setInterval(async () => {
+      if (!fsUuid) return;
+      try {
+        const resp = await fetch("/fs-test/status?uuid=" + encodeURIComponent(fsUuid), {
+          headers: {"X-Bridge-Secret": getSecret()}
+        });
+        const data = await resp.json();
+        if (data.error) { setStatus("话务层状态查询失败：" + data.error, false); return; }
+        if (!data.up) {
+          callHungUp = true;
+          callLive = false;
+          stopPoll();
+          setStatus("已挂断。", true);
+          refreshResult(true);
+          return;
+        }
+        callLive = true;
+      } catch (e) { /* 下一轮再试 */ }
+      refreshResult(false);
+    }, 3000);
+  }
+  async function startCall(target) {
+    const caller = document.getElementById("fs_caller").value.trim();
+    if (!caller) { setStatus("请先填客户手机号码。", false); return; }
+    lastCaller = caller;
+    popSeen = false;
+    callHungUp = false;
+    callLive = false;
+    fsUuid = "";
+    stopPoll();
+    setStatus("正在拨打…", true);
+    document.getElementById("fs_result").style.display = "none";
+    try {
+      const data = await postJson("/fs-test/call", {caller: caller, target: target});
+      showRaw(data.steps || []);
+      if (data.warning) setStatus("注意：" + data.warning, false);
+      if (!data.ok || !data.uuid) {
+        setStatus("拨打失败：" + (data.error || "未知错误"), false);
+        return;
+      }
+      fsUuid = data.uuid;
+      setStatus("已拨打，通话 UUID：" + fsUuid + "（正在排队等待测试坐席接听…）。", true);
+      startPoll();
+    } catch (e) {
+      setStatus("请求失败：" + e, false);
+    }
+  }
+  document.getElementById("fs_call").addEventListener("click", () => startCall("queue"));
+  document.getElementById("fs_vm").addEventListener("click", () => startCall("voicemail"));
+  document.getElementById("fs_noagent").addEventListener("click", () => startCall("queue-noagent"));
+  document.getElementById("fs_hangup").addEventListener("click", async () => {
+    if (!fsUuid) { setStatus("当前没有进行中的测试通话。", false); return; }
+    try {
+      const data = await postJson("/fs-test/hangup", {uuid: fsUuid});
+      showRaw(data.steps || []);
+      callHungUp = true;
+      callLive = false;
+      stopPoll();
+      setStatus("已挂断（测试坐席已清理）。", true);
+      setTimeout(() => refreshResult(true), 1500);
+    } catch (e) {
+      setStatus("挂断请求失败：" + e, false);
+    }
   });
-
-  document.getElementById("vm_go").addEventListener("click", async () => {
-    const btn = document.getElementById("vm_go");
-    const box = document.getElementById("vm_result");
-    const secret = document.getElementById("secret").value.trim();
-    localStorage.setItem("bridge_secret", secret);
-    btn.disabled = true; btn.textContent = "正在生成留言...";
-    box.style.display = "none";
+  document.getElementById("fs_play").addEventListener("click", async () => {
+    if (!fsUuid) { setStatus("当前没有进行中的测试通话。", false); return; }
     try {
-      const resp = await fetch("/simulate/voicemail", {
-        method: "POST",
-        headers: {"Content-Type": "application/json", "X-Bridge-Secret": secret},
-        body: JSON.stringify({
-          caller_id_number: document.getElementById("vm_caller").value.trim()
-        })
-      });
-      const data = await resp.json();
-      box.style.display = "block";
-      if (resp.ok && data.record_id) {
-        const link = "/desk?record=" + data.record_id;
-        box.className = "ok";
-        box.innerHTML = "语音留言记录已生成（编号 " + data.record_id +
-          "）。<br><a href='" + link + "' target='_blank'>点这里打开这条留言记录</a>";
-      } else {
-        box.className = "err";
-        box.textContent = "没有生成留言记录：" + JSON.stringify(data);
-      }
+      const data = await postJson("/fs-test/play", {uuid: fsUuid, which: "agent"});
+      showRaw(data.steps || []);
+      setStatus(data.ok ? "已向通话播放测试音频。" : "播放失败：" + (data.error || ""), data.ok);
     } catch (e) {
-      box.style.display = "block"; box.className = "err";
-      box.textContent = "请求失败：" + e;
+      setStatus("播放请求失败：" + e, false);
     }
-    btn.disabled = false; btn.textContent = "模拟留一条语音留言";
+  });
+  document.getElementById("fs_cleanup").addEventListener("click", async () => {
+    try {
+      const data = await postJson("/fs-test/cleanup", {});
+      showRaw(data.steps || []);
+      setStatus("测试坐席已清理。", true);
+    } catch (e) {
+      setStatus("清理请求失败：" + e, false);
+    }
   });
 
   async function downloadXlsx(path, filename) {
@@ -452,6 +562,118 @@ async def simulate_voicemail(request: Request, x_bridge_secret: str | None = Hea
         "start_epoch": int(time.time()), "recording_path": filename})
 
 
+
+
+# ------------------------------------------------------------------ FS test console
+# Software-only telephony test: the /test page drives REAL FreeSWITCH
+# calls (queue / voicemail) over ESL instead of posting fake events.
+# Secret-protected like /simulate/*; the production build must disable
+# these together with /test + /simulate (audit gate).
+
+
+@app.post("/fs-test/call")
+async def fs_test_call(request: Request,
+                       x_bridge_secret: str | None = Header(default=None)):
+    """Originate a real test call into FreeSWITCH (queue or voicemail).
+
+    Body: {"caller": "138...", "target": "queue" | "voicemail"}.
+    Returns {"ok", "uuid", "error", "steps", "warning"}; steps carry
+    every ESL command + verbatim reply so the test page can show
+    exactly what FreeSWITCH did."""
+    check_secret(x_bridge_secret)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    caller = str(body.get("caller") or "13800000000")
+    target = str(body.get("target") or "queue")
+    if target not in ("queue", "queue-noagent", "voicemail"):
+        raise HTTPException(
+            status_code=400,
+            detail="target must be queue, queue-noagent or voicemail")
+    return fs_test.place_fs_call(esl_command, caller, target, RECORDING_DIR)
+
+
+@app.post("/fs-test/hangup")
+async def fs_test_hangup(request: Request,
+                         x_bridge_secret: str | None = Header(default=None)):
+    check_secret(x_bridge_secret)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    uuid = str(body.get("uuid") or "")
+    if not uuid:
+        raise HTTPException(status_code=400, detail="uuid required")
+    return fs_test.hangup_fs_call(esl_command, uuid)
+
+
+@app.post("/fs-test/play")
+async def fs_test_play(request: Request,
+                       x_bridge_secret: str | None = Header(default=None)):
+    check_secret(x_bridge_secret)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    uuid = str(body.get("uuid") or "")
+    which = str(body.get("which") or "agent")
+    if not uuid:
+        raise HTTPException(status_code=400, detail="uuid required")
+    if which not in ("agent", "caller"):
+        raise HTTPException(
+            status_code=400, detail="which must be agent or caller")
+    return fs_test.play_fs_audio(esl_command, uuid, which)
+
+
+@app.post("/fs-test/cleanup")
+async def fs_test_cleanup(request: Request,
+                          x_bridge_secret: str | None = Header(default=None)):
+    check_secret(x_bridge_secret)
+    return {"steps": fs_test.remove_test_agent(esl_command)}
+
+
+@app.get("/fs-test/status")
+def fs_test_status(uuid: str = "",
+                   x_bridge_secret: str | None = Header(default=None)):
+    check_secret(x_bridge_secret)
+    if not uuid:
+        raise HTTPException(status_code=400, detail="uuid required")
+    return fs_test.call_status(esl_command, uuid)
+
+
+@app.get("/fs-test/result")
+def fs_test_result(caller: str = "",
+                   x_bridge_secret: str | None = Header(default=None)):
+    check_secret(x_bridge_secret)
+    rows = bridge.store.list_records(caller=caller, limit=1)
+    if not rows:
+        return {"record": None}
+    rec = rows[0]
+    full = bridge.store.get_record(rec["record_id"]) or {}
+    rec["display_id"] = display_call_id(full) if full else rec["call_id"]
+    rec["has_recording"] = find_recording_file(
+        full.get("recording_file") or "") is not None
+    return {"record": rec}
+
+
+@app.get("/fs-test/recording/{record_id}")
+def fs_test_recording(request: Request, record_id: int,
+                      x_bridge_secret: str | None = Header(default=None)):
+    check_secret(x_bridge_secret, request.query_params.get("secret"))
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    path = find_recording_file(rec.get("recording_file") or "")
+    if not path:
+        raise HTTPException(status_code=404, detail="no recording")
+    return Response(open(path, "rb").read(), media_type="audio/wav")
 
 
 # ------------------------------------------------------------------ desk
