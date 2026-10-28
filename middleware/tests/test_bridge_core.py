@@ -1,4 +1,5 @@
 import os
+import json
 import queue
 import socket
 import sys
@@ -220,6 +221,18 @@ class TestBridgeEventPairing(unittest.TestCase):
         item = live.get(timeout=2)
         self.assertEqual(item["call_id"], "uuid-caller")
         self.assertEqual(item["seat"], "8002")
+        # Raw-traffic capture: structure only, no values leak.
+        cap = listener.capture()
+        self.assertEqual(cap["raw_seen"], 2)
+        self.assertGreater(cap["last_recv_at"], 0)
+        self.assertEqual(len(cap["recent"]), 2)
+        self.assertTrue(all(r["is_bridge"] for r in cap["recent"]))
+        self.assertIn("Event-Name", cap["recent"][0]["body"])
+        self.assertIn("Content-Length", cap["recent"][0]["envelope"])
+        blob = json.dumps(cap)
+        self.assertNotIn("uuid-caller", blob)
+        self.assertNotIn("uuid-agent", blob)
+        self.assertNotIn("8002", blob)
 
 
 def make_bridge(tmp, roster=None):

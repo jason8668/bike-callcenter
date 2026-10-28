@@ -688,6 +688,20 @@ def fs_test_status(uuid: str = "",
     return fs_test.call_status(esl_command, uuid)
 
 
+@app.get("/fs-test/esl-capture")
+def fs_test_esl_capture(x_bridge_secret: str | None = Header(default=None)):
+    """Raw ESL traffic snapshot for diagnosing a silent listener:
+    message structure only (header names, never values), so it proves
+    whether anything arrives and what shape it has without exposing
+    call data. Secret-protected like the other /fs-test endpoints."""
+    check_secret(x_bridge_secret)
+    cap = bridge.event_listener_capture()
+    if cap is None:
+        return {"enabled": False}
+    cap["enabled"] = True
+    return cap
+
+
 @app.get("/fs-test/result")
 def fs_test_result(caller: str = "", since: int = 0,
                    x_bridge_secret: str | None = Header(default=None)):

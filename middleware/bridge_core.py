@@ -1201,6 +1201,14 @@ class BridgeEventListener:
         self.events_seen = 0
         self.pairs_resolved = 0
         self.live_queued = 0
+        # Raw-traffic capture for /fs-test/esl-capture: message
+        # STRUCTURE only (header names, never values) so a silent
+        # listener can be told apart from a parsing miss without
+        # exposing caller numbers or UUIDs. Last 5 loop messages.
+        self.raw_seen = 0
+        self.raw_recent = []
+        self.last_recv_at = 0.0
+        self.last_error = ""
         self._stop = threading.Event()
 
     def start(self) -> None:
@@ -1223,13 +1231,24 @@ class BridgeEventListener:
         except sqlite3.Error:
             pass  # mapping loss degrades to today's seat-less behavior
 
+    def capture(self) -> dict:
+        """Diagnostic snapshot of raw ESL traffic: message structure
+        only (header names, never values) so a silent listener can be
+        told apart from a parsing miss without exposing call data."""
+        return {"connected": self.connected,
+                "raw_seen": self.raw_seen,
+                "last_recv_at": self.last_recv_at,
+                "last_error": self.last_error,
+                "recent": list(self.raw_recent)}
+
     def _run(self) -> None:
         delay = 2.0
         while not self._stop.is_set():
             try:
                 self._serve()
                 delay = 2.0
-            except Exception:
+            except Exception as e:
+                self.last_error = type(e).__name__
                 self.connected = False
                 self._stop.wait(delay)
                 delay = min(delay * 2, 60.0)
@@ -1278,15 +1297,19 @@ class BridgeEventListener:
                     head = read_block()
                 except socket.timeout:
                     continue
-                headers = {}
+                self.raw_seen += 1
+                self.last_recv_at = time.time()
+                head_headers = {}
                 for line in head.decode(errors="replace").splitlines():
                     if ":" in line:
                         k, v = line.split(":", 1)
-                        headers[k.strip()] = v.strip()
+                        head_headers[k.strip()] = v.strip()
+                headers = dict(head_headers)
                 length = 0
-                raw_len = headers.get("Content-Length", "")
+                raw_len = head_headers.get("Content-Length", "")
                 if raw_len.isdigit():
                     length = int(raw_len)
+                body_names = None
                 if length:
                     try:
                         body = read_body(length)
@@ -1299,11 +1322,20 @@ class BridgeEventListener:
                     # every event, so parse the body when it is one.
                     # A message with no Content-Length keeps its
                     # headers from the first block, as before.
-                    if headers.get("Content-Type") == "text/event-plain":
+                    if head_headers.get("Content-Type") == "text/event-plain":
+                        body_names = []
                         for line in body.decode(errors="replace").splitlines():
                             if ":" in line:
                                 k, v = line.split(":", 1)
                                 headers[k.strip()] = v.strip()
+                                body_names.append(k.strip())
+                # Structure only: header names, never values.
+                self.raw_recent.append({
+                    "envelope": sorted(head_headers),
+                    "body": sorted(body_names) if body_names is not None else None,
+                    "is_bridge": headers.get("Event-Name") == "CHANNEL_BRIDGE",
+                })
+                self.raw_recent = self.raw_recent[-5:]
                 if headers.get("Event-Name") != "CHANNEL_BRIDGE":
                     continue
                 self.events_seen += 1
@@ -1386,6 +1418,14 @@ class Bridge:
                 "pairs": listener.pairs_resolved,
                 "mapped": listener.mapped,
                 "live": listener.live_queued}
+
+    def event_listener_capture(self) -> Optional[dict]:
+        """None when disabled, else the listener's raw-traffic
+        snapshot for /fs-test/esl-capture (structure only)."""
+        listener = self._event_listener
+        if listener is None:
+            return None
+        return listener.capture()
 
     def _agent_statuses(self) -> dict:
         """Seat -> FreeSWITCH agent status (Available / On Call /
