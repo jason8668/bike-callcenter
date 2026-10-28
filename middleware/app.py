@@ -127,7 +127,15 @@ async def call_event(request: Request, x_bridge_secret: str | None = Header(defa
 
 @app.post("/cdr")
 async def cdr(request: Request, x_bridge_secret: str | None = Header(default=None)):
-    check_secret(x_bridge_secret, request.query_params.get("secret"))
+    # mod_json_cdr appends "?uuid=<call-uuid>" to the POST URL, so a
+    # template URL that already carries "?secret=" arrives as
+    # "?secret=<secret>?uuid=<uuid>" and the query parser folds the
+    # uuid into the secret value, failing auth on every CDR. Strip
+    # that suffix before comparing; the uuid itself is redundant
+    # (the CDR body carries it).
+    raw_secret = request.query_params.get("secret")
+    alt_secret = raw_secret.split("?")[0] if raw_secret else None
+    check_secret(x_bridge_secret, alt_secret)
     content_type = request.headers.get("content-type", "")
     if "json" in content_type:
         payload = await request.json()
@@ -220,7 +228,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <div class="card">
 <h1>FreeSWITCH 真实通话测试</h1>
 <p class="hint">不再发假数据：点拨打后，桥接通过 ESL 指挥 FreeSWITCH 真打一通电话——进 8000 队列、测试坐席接听、录音、话单，全部走真实链路；结果直接出现在客服工作台上。旧版 HTTP 模拟接口 /simulate/* 仍保留（无 FS 环境和实测套件用），本页不再链接它们。</p>
-<p class="hint">使用前：先用坐席账号登录工作台（/），再回到本页拨打；也可以不登录，只看本页的结果记录和 FS 回显。拨打后测试坐席会自动接听；想测留言超时就别挂断，等 60 秒后队列自动转 8009 留言。</p>
+<p class="hint">使用前：先用坐席账号登录工作台（/），再回到本页拨打；也可以不登录，只看本页的结果记录和 FS 回显。拨打后测试坐席会自动接听；想测留言超时就别挂断，等 30 秒后队列自动转 8009 留言。</p>
 
 <label>客户手机号码</label>
 <input id="fs_caller" value="13800000000">
