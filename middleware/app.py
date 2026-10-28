@@ -745,8 +745,7 @@ def desk_page_html(seat: str) -> str:
         <input type="hidden" id="fKind" value="">
         <div class="date-field"><input id="fDate" type="text" placeholder="按日期筛选" readonly onclick="openDatePicker(this)"><span class="date-chev">▾</span></div>
         <button class="btn btn-sm" onclick="searchList()">搜索</button>
-        <span style="color:var(--muted);font-size:13px">导出最近</span><input id="fDays" type="text" inputmode="numeric" value="30" title="导出天数" style="width:64px"><span style="color:var(--muted);font-size:13px">天</span>
-        <button class="btn btn-sm btn-ghost" onclick="openExportPreview()">导出</button>
+        <span style="display:inline-flex;align-items:center;gap:6px;flex:none"><span style="color:var(--muted);font-size:13px">导出最近</span><input id="fDays" type="text" inputmode="numeric" value="30" title="导出天数" style="width:64px;flex:none"><span style="color:var(--muted);font-size:13px">天</span><button class="btn btn-sm btn-ghost" onclick="openExportPreview()">查询</button></span>
       </div>
       <div id="list"><div class="empty">加载中…</div></div>
       <div class="pager">
