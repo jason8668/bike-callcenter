@@ -28,13 +28,18 @@ local function json_escape(s)
 end
 
 if session then
+  -- bridge_ticket is REQUIRED by the bridge: without it the answer
+  -- event is ignored and no record opens during the call (the dialplan
+  -- sets bridge_ticket=1; the payload must carry it, it is not read
+  -- from channel variables by the bridge).
   local payload = string.format(
     '{"event":"%s","uuid":"%s","caller_id_number":"%s","destination_number":"%s",'
-      .. '"direction":"%s","ivr_choice":"%s"}',
+      .. '"bridge_ticket":"%s","direction":"%s","ivr_choice":"%s"}',
     json_escape(event),
     json_escape(session:getVariable("uuid")),
     json_escape(session:getVariable("caller_id_number")),
     json_escape(session:getVariable("destination_number")),
+    json_escape(session:getVariable("bridge_ticket")),
     json_escape(session:getVariable("direction")),
     json_escape(session:getVariable("ivr_choice"))
   )

@@ -11,6 +11,10 @@
            queue automatically. -->
       <param name="strategy" value="agent-with-fewest-calls"/>
       <param name="moh-sound" value="tone_stream://%(1000,1000,440)"/>
+      <!-- Record the bridged conversation only (answer to hangup; wait
+           time is not recorded, abandoned calls leave no file). Named
+           by CallID so the bridge binds it from the CDR record_path. -->
+      <param name="record-template" value="/recordings/${uuid}.wav"/>
       <param name="time-base-score" value="system"/>
       <param name="max-wait-time" value="60"/>
       <param name="max-wait-time-with-no-agent" value="30"/>

@@ -36,6 +36,10 @@
         <action application="set" data="bridge_secret=__BRIDGE_SECRET__"/>
         <!-- Marker the bridge requires before creating a ticket. -->
         <action application="set" data="bridge_ticket=1"/>
+        <!-- Lets the hangup CDR carry the recording path to the bridge
+             (same channel-variable mechanism as bridge_ticket). Must
+             match the queue's record-template. -->
+        <action application="set" data="record_path=/recordings/${uuid}.wav"/>
         <!-- Runs when the queued call is bridged to an agent: the
              ticket pops DURING the call. Verify in the internal test;
              if it does not fire, the CDR still creates the ticket at
