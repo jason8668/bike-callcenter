@@ -1251,7 +1251,7 @@ class BridgeEventListener:
             if b"+OK" not in read_block():
                 raise ConnectionError("esl auth rejected")
             sock.sendall(
-                f"events plain {ESL_EVENT_SUBSCRIPTION}\n\n".encode())
+                f"event plain {ESL_EVENT_SUBSCRIPTION}\n\n".encode())
             if b"+OK" not in read_block():
                 raise ConnectionError("esl subscribe rejected")
             self.connected = True

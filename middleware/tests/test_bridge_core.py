@@ -135,6 +135,7 @@ class TestBridgeEventPairing(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         bridge = make_bridge(tmp)
         port_holder = []
+        subscribe_lines = []
 
         def fake_esl():
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -152,6 +153,10 @@ class TestBridgeEventPairing(unittest.TestCase):
             buf = b""
             while b"\n\n" not in buf:
                 buf += conn.recv(4096)
+            # The wire command is "event" (singular): FreeSWITCH has
+            # no "events" command, and blindly +OKing any subscribe
+            # once hid exactly that one-word bug from this test.
+            subscribe_lines.append(buf.split(b"\n")[0].decode())
             conn.sendall(b"Content-Type: command/reply\n"
                          b"Reply-Text: +OK accepted\n\n")
             caller_block = (
@@ -191,6 +196,7 @@ class TestBridgeEventPairing(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(bridge.store.agent_for_call("uuid-caller"),
                          "8002")
+        self.assertEqual(subscribe_lines, ["event plain CHANNEL_BRIDGE"])
         item = live.get(timeout=2)
         self.assertEqual(item["call_id"], "uuid-caller")
         self.assertEqual(item["seat"], "8002")

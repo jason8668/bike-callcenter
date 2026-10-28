@@ -814,8 +814,8 @@ border-radius:999px;padding:6px 14px;font-size:14px}
 .seat-note{color:var(--muted);font-size:13px;margin-top:10px;line-height:1.6}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
 .dot-green{background:#34c759}.dot-amber{background:#ff9500}.dot-gray{background:#8a8a8e}
-.topbar .seats{flex-direction:column;gap:4px;align-items:flex-start}
-.topbar .seat-chip{padding:3px 10px;font-size:12px}
+.topbar .seats{flex-direction:column;gap:2px;align-items:flex-start}
+.topbar .seat-chip{padding:2px 8px;font-size:13px}
 .topbar .dot{width:7px;height:7px;margin-right:5px}
 .stats{display:flex;gap:28px;margin-bottom:8px}
 .stat b{font-size:28px;display:block;letter-spacing:-.5px}
@@ -881,7 +881,9 @@ border-radius:16px;padding:10px 12px;margin:10px 0}
 .user-box .tag-chip{padding:4px 8px;font-size:12px}
 .user-box .tag-sug{padding:4px 10px;font-size:12px}
 .tag-row{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}
-.tag-row>*{flex:1;min-width:180px}
+.tag-row>.tag-box{flex:2;min-width:220px}
+.tag-side{flex:1;min-width:180px;display:flex;flex-direction:column;gap:8px}
+.tag-side .meta-item{flex:1}
 .tag-box{margin:0}
 .tag-box input{flex:1;min-width:0}
 .tag-chip{display:inline-flex;align-items:center;gap:4px;background:#007aff;color:#fff;
@@ -1396,8 +1398,9 @@ async function openRecord(id) {
     '<div style="display:flex;gap:8px;margin-top:6px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}\">' +
     '<button class="btn btn-sm" id="addTagBtn" onclick="addTag()">添加</button></div>' +
     '<div id="tagSuggest"></div></div>' +
+    '<div class="tag-side">' +
     '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
-    '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div></div>" +
+    '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div></div></div>" +
     '<div class="meta-item" style="margin-top:10px"><div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--muted);font-size:12px">录音</span><span class="mono" style="color:var(--muted);font-size:12px">通话ID ' + esc(d.display_id || d.call_id) + '</span></div>' +
     '<div style="margin-top:6px">' + audio + '</div></div>';
   // can_edit is explicit-false only when the backend says another seat
