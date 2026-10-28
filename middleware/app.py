@@ -1349,7 +1349,12 @@ async function openRecord(id) {
     '<span style="font-weight:600">登记内容</span>' +
     (locked ? '<span class="pill pill-green" id="regPill">已登记</span>'
             : '<span class="pill pill-gray" id="regPill">未登记</span>') + "</div>" +
-    "<label>服务类型</label><select id='fService'" + dis + "><option value=''></option>" + opts + "</select>" +
+    '<div style="display:flex;gap:12px;flex-wrap:wrap">' +
+    "<div style='flex:1;min-width:180px'><label>服务类型</label><select id='fService'" + dis + "><option value=''></option>" + opts + "</select></div>" +
+    "<div style='flex:1;min-width:220px'><label>用户卡号</label>" +
+    '<div style="display:flex;gap:8px"><input id="fCard" value="' + attrEsc(d.card || "") + '" placeholder="输入用户卡号">' +
+    '<button class="btn btn-sm" onclick="saveCard()">保存卡号</button></div>' +
+    '<div id="cardMsg" style="color:var(--muted);font-size:13px;margin-top:4px"></div></div></div>' +
     "<label>通话内容（客户问的什么问题）</label>" +
     "<textarea id='fQuestion' rows='3'" + dis + ">" + esc(d.question) + "</textarea>" +
     (locked
@@ -1361,7 +1366,7 @@ async function openRecord(id) {
     '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>通话ID</span><b class="mono">' + esc(d.display_id || d.call_id) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>录音</span>' + audio + "</div></div>";
-  renderPortrait(d.history, d.card);
+  renderPortrait(d.history);
   currentDefaults = d.default_tags || [];
   renderTagChips(d.tags || []);
   var attached = {};
@@ -1370,15 +1375,10 @@ async function openRecord(id) {
   renderCallerHistory(d.history);
   try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
 }
-function portraitUserBox(card) {
+function portraitUserBox() {
   return '<div class="user-box">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
-    '<span style="font-weight:600">卡号与标签</span></div>' +
-    "<label>用户卡号</label>" +
-    '<div style="display:flex;gap:8px"><input id="fCard" value="' + attrEsc(card || "") + '" placeholder="输入用户卡号">' +
-    '<button class="btn btn-sm" onclick="saveCard()">保存卡号</button></div>' +
-    '<div id="cardMsg" style="color:var(--muted);font-size:13px;margin-top:4px"></div>' +
-    "<label>用户标签</label>" +
+    '<span style="font-weight:600">用户标签</span></div>' +
     '<div id="tagChips"></div>' +
     '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}">' +
     '<button class="btn btn-sm" onclick="addTag()">添加</button></div>' +
@@ -1399,12 +1399,12 @@ function portraitLine(label, value) {
     '<span style="color:var(--muted);flex:none">' + esc(label) + '</span>' +
     '<b style="text-align:right">' + value + '</b></div>';
 }
-function renderPortrait(h, card) {
+function renderPortrait(h) {
   var box = $("customerPortrait");
   if (!box) return;
   var p = (h && h.portrait) || null;
   if (!p || !p.total) {
-    box.innerHTML = '<div style="color:var(--muted);font-size:13px;margin-bottom:8px">该客户暂无历史记录。</div>' + portraitUserBox(card);
+    box.innerHTML = '<div style="color:var(--muted);font-size:13px;margin-bottom:8px">该客户暂无历史记录。</div>' + portraitUserBox();
     return;
   }
   var bk = p.by_kind || {};
@@ -1423,7 +1423,7 @@ function renderPortrait(h, card) {
     html += portraitLine("上次反映", lastNote);
   }
   if (p.via_card) html += portraitLine("同卡他号来电", p.via_card + " 次");
-  box.innerHTML = html + '<div style="height:8px"></div>' + portraitUserBox(card);
+  box.innerHTML = html + '<div style="height:8px"></div>' + portraitUserBox();
 }
 function renderCallerHistory(h) {
   var box = $("callerHistory");
@@ -1510,7 +1510,7 @@ async function saveCard() {
   });
   if (!r.ok) { $("cardMsg").textContent = "保存失败"; return; }
   var d = await r.json();
-  if (d.history) { renderPortrait(d.history, d.card); renderCallerHistory(d.history); }
+  if (d.history) { renderPortrait(d.history); renderCallerHistory(d.history); }
   $("cardMsg").textContent = d.card ? "已保存：卡号已关联到该号码" : "已清空：该号码的卡号关联已取消";
 }
 function editNotes() {
