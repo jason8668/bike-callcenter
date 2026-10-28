@@ -837,7 +837,7 @@ border-radius:16px;padding:12px 14px;margin:10px 0}
 .notes-box label:first-child{margin-top:0}
 .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}
 .meta-item{background:rgba(120,120,128,.08);border-radius:12px;padding:8px 12px}
-.meta-item span{display:block;color:var(--muted);font-size:12px;margin-bottom:2px}
+.meta-item>span{display:block;color:var(--muted);font-size:12px;margin-bottom:2px}
 .meta-item b{font-size:14px;font-weight:600}
 .meta-item .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
 .meta-wide{grid-column:1 / -1}
@@ -1420,7 +1420,7 @@ function renderPortrait(h) {
     html += '<div class="meta-item meta-wide"><span>上次反映</span><b>' + lastNote + '</b></div>';
   }
   if (p.top_tags && p.top_tags.length) {
-    html += '<div class="meta-item meta-wide"><span>常用标签</span><b>' + p.top_tags.map(function(t) { return '<span class="tag-chip">' + esc(t) + '</span>'; }).join(" ") + '</b></div>';
+    html += '<div class="meta-item meta-wide"><span>常用标签</span><div style="display:flex;flex-wrap:wrap;gap:6px">' + p.top_tags.map(function(t) { return '<span class="tag-chip">' + esc(t) + '</span>'; }).join("") + '</div></div>';
   }
   if (p.via_card) html += '<div class="meta-item"><span>同卡他号来电</span><b>' + p.via_card + ' 次</b></div>';
   html += '</div>';
