@@ -1063,7 +1063,11 @@ def explicit_agent(headers: dict, seats=DESK_SEATS) -> Optional[str]:
 def leg_seat(headers: dict, seats=DESK_SEATS) -> Optional[str]:
     """Seat number for an agent leg, from its channel identity hints.
     The seat must match as a full segment ("/8002@" or exact "8002"),
-    never as a substring, so 80011 never matches 8001."""
+    never as a substring, so 80011 never matches 8001. TEST-ONLY
+    mirrors: loopback/801x legs (the /test console's emulated-seat
+    contacts) map to seats 800x by the same full-segment rule --
+    8011-8013 exist only as test extensions, so a mirror identity can
+    only come from a test."""
     seat = explicit_agent(headers, seats)
     if seat:
         return seat
@@ -1073,6 +1077,7 @@ def leg_seat(headers: dict, seats=DESK_SEATS) -> Optional[str]:
         headers.get("variable_dialed_user", ""),
         headers.get("Channel-Name", ""),
     ]
+    mirrors = {"8011": "8001", "8012": "8002", "8013": "8003"}
     for c in candidates:
         c = (c or "").strip()
         if not c:
@@ -1080,6 +1085,10 @@ def leg_seat(headers: dict, seats=DESK_SEATS) -> Optional[str]:
         for seat in seats:
             if c == seat or ("/" + seat + "@" in c) or \
                     c.endswith("/" + seat) or ("/" + seat + "/" in c):
+                return seat
+        for mirror, seat in mirrors.items():
+            if c == mirror or ("/" + mirror + "@" in c) or \
+                    c.endswith("/" + mirror) or ("/" + mirror + "/" in c):
                 return seat
     return None
 

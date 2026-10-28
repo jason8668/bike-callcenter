@@ -48,14 +48,18 @@ TEST_AGENT_NAME = "testagent"
 TEST_AGENT_CONTACT = "loopback/8999"
 TEST_QUEUE = "客服队列"
 
-# Emulated-seat answers reuse the test agent's auto-answer extension:
-# pointing a real seat's queue contact at loopback/8999 makes the
-# queue bridge the caller to it exactly as it would to a handset, so
-# the full seat path (bridge event -> pairing -> answer-time record ->
-# directed pop -> CDR agent) runs on the cloud box with no handsets.
-# The caller leg carries cc_agent=<seat> (and so does its CDR), which
-# is what the pairing and the CDR agent fill read.
-SEAT_ANSWER_CONTACT = "loopback/8999"
+# Emulated-seat answers use a PER-SEAT mirror extension, not the
+# shared loopback/8999 test agent: CHANNEL_BRIDGE events carry no queue
+# agent name (no cc_agent on the member leg -- proven by the 2026-10-28
+# 16:09:51 record, and the reason the old shared contact could never
+# tell the bridge which seat answered, so seat-emulated calls came out
+# agent-less and never popped). Pointing seat 800x's queue contact at
+# loopback/801x makes the agent leg itself name the seat, and the
+# bridge pairs it via the mirror map in bridge_core.leg_seat.
+# 8011-8013 exist only as test extensions; the test page restores
+# every seat's contact to user/<seat> on hangup / cleanup.
+SEAT_ANSWER_CONTACTS = {"8001": "loopback/8011", "8002": "loopback/8012",
+                        "8003": "loopback/8013"}
 DESK_SEATS = ("8001", "8002", "8003")
 
 # Paths as FreeSWITCH sees them (shared /recordings volume). The bridge
@@ -197,15 +201,17 @@ def remove_test_agent(esl: Callable[[str], Optional[str]]) -> list:
 
 def seat_answer_steps(esl: Callable[[str], Optional[str]],
                       seat: str) -> list:
-    """Point one real seat's queue contact at the auto-answer
-    extension and make sure it is Available, so the next queue call
-    is answered 'as' that seat. Best effort, never raises; every step
-    is reported. Also repairs a seat left On Break by an earlier *51
-    test, which would otherwise never be called by the queue."""
+    """Point one real seat's queue contact at its own mirror
+    auto-answer extension and make sure it is Available, so the next
+    queue call is answered 'as' that seat. Best effort, never raises;
+    every step is reported. Also repairs a seat left On Break by an
+    earlier *51 test, which would otherwise never be called by the
+    queue."""
+    contact = SEAT_ANSWER_CONTACTS.get(seat, TEST_AGENT_CONTACT)
     steps = []
     for cmd in (
         "callcenter_config agent set contact " + seat +
-        " " + SEAT_ANSWER_CONTACT,
+        " " + contact,
         "callcenter_config agent set status " + seat + " Available",
     ):
         try:
@@ -243,8 +249,9 @@ def place_fs_call(esl: Callable[[str], Optional[str]], caller: str,
 
     answer_seat: "" (default) answers with the test agent (no seat,
     no directed pop, by design); "8001"/"8002"/"8003" answers with
-    that seat emulated (its queue contact points at the auto-answer
-    extension, so the seat path runs end to end). Ignored unless
+    that seat emulated (its queue contact points at its own mirror
+    auto-answer extension loopback/801x, so the agent leg itself
+    names the seat and the seat path runs end to end). Ignored unless
     target == "queue". Returns {"ok", "uuid" | None, "error" | None,
     "steps", "warning"}; ``steps`` carries every ESL command +
     verbatim reply so the test page can show exactly what

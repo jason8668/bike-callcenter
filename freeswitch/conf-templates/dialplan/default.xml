@@ -66,6 +66,36 @@
       </condition>
     </extension>
 
+    <!-- TEST-ONLY per-seat mirror extensions for the /test FS console's
+         emulated-seat mode (no real phone): pointing seat 8001's queue
+         contact at loopback/8011 (8002 -> 8012, 8003 -> 8013) makes the
+         agent leg itself carry the seat number, because CHANNEL_BRIDGE
+         events do NOT carry the queue agent name (no cc_agent on the
+         member leg, proven by the 2026-10-28 16:09:51 record, and the
+         reason the old shared loopback/8999 contact could never tell
+         the bridge which seat answered). The bridge pairs loopback/801x
+         legs to seats 800x. Inert unless dialed: nothing in production
+         dials 8011-8013, and the test page restores every seat's
+         contact to user/<seat> on hangup / cleanup. -->
+    <extension name="test-seat-8001">
+      <condition field="destination_number" expression="^8011$">
+        <action application="answer"/>
+        <action application="sleep" data="3600000"/>
+      </condition>
+    </extension>
+    <extension name="test-seat-8002">
+      <condition field="destination_number" expression="^8012$">
+        <action application="answer"/>
+        <action application="sleep" data="3600000"/>
+      </condition>
+    </extension>
+    <extension name="test-seat-8003">
+      <condition field="destination_number" expression="^8013$">
+        <action application="answer"/>
+        <action application="sleep" data="3600000"/>
+      </condition>
+    </extension>
+
     <!-- Voicemail: record, then the hangup hook posts to the bridge.
          The recording file is named after the CallID so the bridge
          finds it in the shared /recordings volume. -->

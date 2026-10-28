@@ -159,7 +159,7 @@ class TestPlaceCall(unittest.TestCase):
         esl = FakeEsl({})
         steps = fs_test.seat_answer_steps(esl, "8002")
         self.assertEqual([s["command"] for s in steps], [
-            "callcenter_config agent set contact 8002 loopback/8999",
+            "callcenter_config agent set contact 8002 loopback/8012",
             "callcenter_config agent set status 8002 Available",
         ])
 
@@ -179,7 +179,7 @@ class TestPlaceCall(unittest.TestCase):
                                            d, answer_seat="8002")
         self.assertTrue(result["ok"])
         self.assertEqual(result["uuid"], "call-uuid-1")
-        self.assertTrue(any("agent set contact 8002 loopback/8999" in c
+        self.assertTrue(any("agent set contact 8002 loopback/8012" in c
                             for c in esl.commands))
         self.assertTrue(any("agent set status 8002 Available" in c
                             for c in esl.commands))
@@ -213,7 +213,9 @@ class TestDialplan(unittest.TestCase):
                             "default.xml")
         root = ET.parse(path).getroot()
         names = [e.get("name") for e in root.iter("extension")]
-        for expected in ("queue", "voicemail", "test-agent"):
+        for expected in ("queue", "voicemail", "test-agent",
+                         "test-seat-8001", "test-seat-8002",
+                         "test-seat-8003"):
             self.assertIn(expected, names)
         for ext in root.iter("extension"):
             if ext.get("name") == "test-agent":
@@ -223,6 +225,16 @@ class TestDialplan(unittest.TestCase):
                         for a in ext.iter("action")]
                 self.assertIn("answer", apps)
                 self.assertIn("sleep", apps)
+        mirror_exprs = {}
+        for ext in root.iter("extension"):
+            if (ext.get("name") or "").startswith("test-seat-"):
+                mirror_exprs[ext.get("name")] = \
+                    ext.find("condition").get("expression")
+        self.assertEqual(mirror_exprs, {
+            "test-seat-8001": "^8011$",
+            "test-seat-8002": "^8012$",
+            "test-seat-8003": "^8013$",
+        })
 
 
 if __name__ == "__main__":

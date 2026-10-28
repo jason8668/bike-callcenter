@@ -121,6 +121,16 @@ class TestBridgeEventPairing(unittest.TestCase):
             leg_seat({"Caller-Destination-Number": "8003"}), "8003")
         self.assertIsNone(leg_seat({"Channel-Name": "loopback/8999"}))
         self.assertIsNone(leg_seat({"Channel-Name": "loopback/8000"}))
+        # TEST-ONLY mirrors: loopback/801x legs map to seats 800x.
+        self.assertEqual(
+            leg_seat({"Channel-Name": "loopback/8011"}), "8001")
+        self.assertEqual(
+            leg_seat({"Caller-Destination-Number": "8012"}), "8002")
+        self.assertEqual(
+            leg_seat({"Channel-Name": "loopback/8013"}), "8003")
+        # Mirror segment rule: 18011 must not match 8011.
+        self.assertIsNone(
+            leg_seat({"Channel-Name": "loopback/18011"}))
         # Substring trap: 80011 must not match 8001.
         self.assertIsNone(
             leg_seat({"Channel-Name": "sofia/internal/80011@x"}))

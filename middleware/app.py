@@ -746,13 +746,13 @@ radial-gradient(720px 520px at 50% 115%, rgba(255,149,0,.16), transparent 60%)}
 .topbar,.wrap,.center{position:relative;z-index:1}
 a{color:var(--blue)}
 .topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:14px;
-padding:12px 20px;flex-wrap:wrap;
+padding:8px 16px;flex-wrap:wrap;
 background:rgba(255,255,255,.72);backdrop-filter:blur(20px) saturate(180%);
 -webkit-backdrop-filter:blur(20px) saturate(180%);
 border-bottom:1px solid rgba(0,0,0,.06)}
-.topbar .brand{font-size:19px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:center;gap:10px}
-.logo{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;flex:none;
-border-radius:10px;background:linear-gradient(135deg,#007aff,#5856d6,#ff2d55);font-size:19px;
+.topbar .brand{font-size:17px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:center;gap:10px}
+.logo{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;flex:none;
+border-radius:10px;background:linear-gradient(135deg,#007aff,#5856d6,#ff2d55);font-size:17px;
 box-shadow:0 2px 10px rgba(88,86,214,.35)}
 .topbar .spacer{flex:1}
 .pill{display:inline-block;padding:4px 13px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap}
@@ -840,7 +840,7 @@ border-radius:999px;padding:6px 14px;font-size:14px}
 .topbar .seat-chip{padding:2px 8px;font-size:13px}
 .seat-frame{background:rgba(255,255,255,.6);backdrop-filter:blur(20px) saturate(180%);
 -webkit-backdrop-filter:blur(20px) saturate(180%);border:1px solid rgba(0,0,0,.06);
-border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.06);padding:6px 10px}
+border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.06);padding:4px 8px}
 .topbar .dot{width:7px;height:7px;margin-right:5px}
 .stats{display:flex;gap:28px;margin-bottom:8px}
 .stat b{font-size:28px;display:block;letter-spacing:-.5px}
