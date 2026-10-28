@@ -80,6 +80,14 @@ class TestBridge(unittest.TestCase):
         self.assertEqual(rows[0]["caller"], "13800000000")
         self.assertEqual(rows[0]["kind"], "电话")
         self.assertTrue(rows[0]["rowid"] > 0)
+        self.assertEqual(rows[0]["agent"], "")
+
+    def test_recent_records_carry_owning_seat_for_directed_pop(self):
+        # Answered queue call: the CDR's cc_agent is the owning seat.
+        self.bridge.handle_cdr(dict(CDR, uuid="seat-1",
+                                    cc_agent="8002"))
+        rows = self.bridge.store.recent_records(10)
+        self.assertEqual(rows[0]["agent"], "8002")
 
     def test_answered_call_creates_record_with_recording(self):
         out = self.bridge.handle_cdr(CDR)

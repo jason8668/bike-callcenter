@@ -1607,11 +1607,20 @@ async function pollFeed() {
   if (!rows.length) return;
   if (baseline && rows[0].rowid > baseline) {
     var rec = rows[0];
-    $("alertText").innerHTML = "📞 新" + esc(rec.kind) + " <b>" + esc(rec.caller) + "</b>　正在打开记录…";
-    $("alert").classList.add("show");
-    beep();
-    openRecord(rec.rowid);
+    // Directed pop: the record row refreshes on every desk, but the
+    // banner + auto-open fire only on the owning seat's desk (the
+    // answering agent, else the voicemail owner). A record with no
+    // owner yet (e.g. a missed call) pops nowhere — it just appears
+    // in everyone's list.
+    var mySeat = $("seatLabel").textContent.trim();
+    var owner = rec.agent || "";
     refreshList();
+    if (owner && owner === mySeat) {
+      $("alertText").innerHTML = "📞 新" + esc(rec.kind) + " <b>" + esc(rec.caller) + "</b>　正在打开记录…";
+      $("alert").classList.add("show");
+      beep();
+      openRecord(rec.rowid);
+    }
   }
   baseline = rows[0].rowid;
   } catch (e) { /* next poll retries in 3s */ }

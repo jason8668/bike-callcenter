@@ -464,14 +464,18 @@ class CallStore:
     def recent_records(self, limit: int = 20) -> list[dict]:
         """Newest customer records first, for the agent board feed:
         each row carries its monotonic rowid so the board can tell a
-        newly arrived record from ones it already saw."""
+        newly arrived record from ones it already saw, plus the seat
+        that owns it (answering agent, else voicemail owner seat) so
+        the board can pop the alert only on that seat's desk."""
         with self._conn() as c:
             rows = c.execute(
-                "SELECT rowid, call_id, caller, kind, created_at FROM calls "
+                "SELECT rowid, call_id, caller, kind, created_at, agent,"
+                " owner_seat FROM calls "
                 "WHERE is_record=1 ORDER BY rowid DESC LIMIT ?",
                 (limit,)).fetchall()
         return [{"rowid": r[0], "call_id": r[1], "caller": r[2],
-                 "kind": r[3] or "电话", "created_at": r[4]} for r in rows]
+                 "kind": r[3] or "电话", "created_at": r[4],
+                 "agent": r[5] or r[6] or ""} for r in rows]
 
     def calls_for_caller(self, phone: str, exclude_call_id: str = "",
                          limit: int = 10) -> list[dict]:
