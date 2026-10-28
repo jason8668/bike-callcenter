@@ -890,6 +890,8 @@ body > :not(#exportModal){display:none !important}
 #exportModal .export-panel{box-shadow:none;background:#fff;max-height:none !important;width:100%;overflow:visible !important}
 #exportModal #exportList{max-height:none !important;overflow:visible !important}
 #exportModal #previewAudio{display:none !important}
+#exportModal #exportMeta{display:none !important}
+#exportModal #previewNowPlaying{display:none !important}
 #exportModal .print-head{display:block;margin-bottom:10px}
 #exportModal .print-head h1{font-size:20px;margin:0 0 4px}
 #exportModal .print-head div{font-size:13px;color:#333}
@@ -1054,7 +1056,12 @@ def desk_page_html(seat: str) -> str:
     </div>
     <div id="exportMeta" style="color:var(--muted);font-size:13px;margin:10px 0"></div>
     <div id="exportList" style="max-height:60vh;overflow:auto"></div>
-    <div id="previewNowPlaying" style="color:var(--muted);font-size:13px;margin-top:8px"></div>
+    <div id="previewNowPlaying" style="color:var(--muted);font-size:13px;margin-top:8px;display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span id="previewNowPlayingText"></span>
+        <button class="btn btn-sm btn-ghost" onclick="closePreviewPlayback()" title="关闭播放条">×</button>
+      </div>
+    </div>
     <audio id="previewAudio" controls style="width:100%;display:none;margin-top:8px"></audio>
     <div class="export-actions" style="display:flex;gap:8px;margin-top:12px">
       <button class="btn btn-sm" onclick="printExportPreview()">打印</button>
@@ -1182,6 +1189,8 @@ async function openExportPreview() {
   var days = readExportDays();
   $("exportMeta").textContent = "正在加载…";
   $("exportList").innerHTML = "";
+  $("previewNowPlaying").style.display = "none";
+  $("previewAudio").style.display = "none";
   $("exportModal").style.display = "flex";
   try {
     var r = await api("/desk/export-preview?days=" + days);
@@ -1217,10 +1226,16 @@ function playPreviewRecording(btn, id) {
   var a = $("previewAudio");
   a.src = "/desk/records/" + id + "/recording";
   a.style.display = "block";
-  $("previewNowPlaying").textContent = "正在播放：" + label;
+  $("previewNowPlayingText").textContent = "正在播放：" + label;
+  $("previewNowPlaying").style.display = "block";
   a.play();
 }
-function closeExportPreview() { $("previewAudio").pause(); $("exportModal").style.display = "none"; }
+function closePreviewPlayback() {
+  $("previewAudio").pause();
+  $("previewAudio").style.display = "none";
+  $("previewNowPlaying").style.display = "none";
+}
+function closeExportPreview() { $("previewAudio").pause(); $("previewNowPlaying").style.display = "none"; $("exportModal").style.display = "none"; }
 function printExportPreview() { window.print(); }
 function downloadExportPreview() { location.href = "/desk/export.xlsx?days=" + exportDays; }
 document.addEventListener("keydown", function(e) { if (e.key === "Escape") closeExportPreview(); });
