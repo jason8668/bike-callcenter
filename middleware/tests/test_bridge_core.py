@@ -6,8 +6,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from bridge_core import (Bridge, CallRecord, CallStore,  # noqa: E402
-                         fmt_cst, fmt_duration, parse_cdr,
-                         summarize_call_history)
+                         can_edit_record, fmt_cst, fmt_duration, parse_cdr,
+                         record_owner, summarize_call_history)
 
 CDR = {
     "uuid": "abc-123", "caller_id_number": "13800000000",
@@ -88,6 +88,30 @@ class TestBridge(unittest.TestCase):
                                     cc_agent="8002"))
         rows = self.bridge.store.recent_records(10)
         self.assertEqual(rows[0]["agent"], "8002")
+
+    def test_record_owner_and_edit_permission(self):
+        # Only the owning seat may modify; others view only.
+        self.assertEqual(
+            record_owner({"agent": "8001", "owner_seat": ""}), "8001")
+        self.assertTrue(
+            can_edit_record({"agent": "8001", "owner_seat": ""}, "8001"))
+        self.assertFalse(
+            can_edit_record({"agent": "8001", "owner_seat": ""}, "8002"))
+        # Voicemail: the dispatched owner seat owns it.
+        self.assertEqual(
+            record_owner({"agent": "", "owner_seat": "8002"}), "8002")
+        self.assertFalse(
+            can_edit_record({"agent": "", "owner_seat": "8002"}, "8001"))
+        # Missed calls (no seat) and FS test-agent calls stay editable
+        # by any seat.
+        self.assertEqual(record_owner({"agent": "", "owner_seat": ""}), "")
+        self.assertTrue(
+            can_edit_record({"agent": "", "owner_seat": ""}, "8001"))
+        self.assertEqual(
+            record_owner({"agent": "testagent", "owner_seat": ""}), "")
+        self.assertTrue(
+            can_edit_record({"agent": "testagent", "owner_seat": ""},
+                            "8002"))
 
     def test_answered_call_creates_record_with_recording(self):
         out = self.bridge.handle_cdr(CDR)

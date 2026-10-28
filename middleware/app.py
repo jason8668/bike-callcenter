@@ -18,7 +18,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from bridge_core import Bridge, CallStore, esl_command, summarize_call_history
+from bridge_core import (Bridge, CallStore, can_edit_record, esl_command,
+                         record_owner, summarize_call_history)
 import fs_test
 from export_xlsx import (CALL_COLUMNS, XLSX_MIME, build_xlsx, call_row,
                           display_call_id)
@@ -1071,7 +1072,7 @@ def desk_page_html(seat: str) -> str:
 </div>
 <div id="datePicker" class="date-picker" style="display:none"></div>
 <script>
-var baseline = 0, currentId = null, offset = 0;
+var baseline = 0, currentId = null, offset = 0, currentCanEdit = true;
 var SERVICE_TYPES = ["还车异常", "借车异常", "锁桩故障", "车辆损坏", "掉链", "乱停放", "扣费退款", "其他"];
 function $(id) { return document.getElementById(id); }
 function esc(s) {
@@ -1364,11 +1365,12 @@ async function openRecord(id) {
     '<span style="font-weight:600">登记内容</span>' +
     (locked ? '<span class="pill pill-green" id="regPill">已登记</span>'
             : '<span class="pill pill-gray" id="regPill">未登记</span>') + "</div>" +
+    (d.can_edit === false ? '<div style="color:var(--muted);font-size:13px;margin-bottom:4px">该记录归属客服' + esc(d.owner || "") + '，仅可查看</div>' : "") +
     '<div style="display:flex;gap:12px;flex-wrap:wrap">' +
     "<div style='flex:1;min-width:180px'><label>服务类型</label><select id='fService'" + dis + "><option value=''></option>" + opts + "</select></div>" +
     "<div style='flex:1;min-width:220px'><label>用户卡号</label>" +
     '<div style="display:flex;gap:8px"><input id="fCard" value="' + attrEsc(d.card || "") + '" placeholder="输入用户卡号">' +
-    '<button class="btn btn-sm" onclick="saveCard()">保存卡号</button></div>' +
+    '<button class="btn btn-sm" id="saveCardBtn" onclick="saveCard()">保存卡号</button></div>' +
     '<div id="cardMsg" style="color:var(--muted);font-size:13px;margin-top:4px"></div></div></div>' +
     "<label>通话内容（客户问的什么问题）</label>" +
     "<textarea id='fQuestion' rows='3'" + dis + ">" + esc(d.question) + "</textarea>" +
@@ -1381,13 +1383,16 @@ async function openRecord(id) {
     '<span style="font-weight:600">用户标签</span></div>' +
     '<div id="tagChips"></div>' +
     '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}">' +
-    '<button class="btn btn-sm" onclick="addTag()">添加</button></div>' +
+    '<button class="btn btn-sm" id="addTagBtn" onclick="addTag()">添加</button></div>' +
     '<div id="tagSuggest"></div></div>' +
     '<div class="meta-grid">' +
     '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
     '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>通话ID</span><b class="mono">' + esc(d.display_id || d.call_id) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>录音</span>' + audio + "</div></div>";
+  // can_edit is explicit-false only when the backend says another seat
+  // owns this record; an absent flag (old backend) stays editable.
+  currentCanEdit = (d.can_edit !== false);
   renderPortrait(d.history);
   currentDefaults = d.default_tags || [];
   renderTagChips(d.tags || []);
@@ -1395,6 +1400,10 @@ async function openRecord(id) {
   (d.tags || []).forEach(function(t) { attached[t] = true; });
   renderTagSuggest(d.frequent_tags || [], currentDefaults, attached);
   renderCallerHistory(d.history);
+  if (!currentCanEdit) {
+    ["fService", "fQuestion", "fCard", "fTag"].forEach(function(id) { var el = $(id); if (el) el.disabled = true; });
+    ["notesBtn", "saveCardBtn", "addTagBtn"].forEach(function(id) { var el = $(id); if (el) el.style.display = "none"; });
+  }
   try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
 }
 function daysAgoText(dateStr) {
@@ -1473,13 +1482,14 @@ var currentDefaults = [];
 function renderTagChips(tags) {
   $("tagChips").innerHTML = tags.length ? tags.map(function(t) {
     return '<span class="tag-chip">' + esc(t) +
-      ' <button type="button" class="tag-rm" data-tag="' + attrEsc(t) + '">×</button></span>';
+      (currentCanEdit === false ? '' : ' <button type="button" class="tag-rm" data-tag="' + attrEsc(t) + '">×</button>') + '</span>';
   }).join("") : '<span style="color:var(--muted)">暂无标签</span>';
   document.querySelectorAll("#tagChips .tag-rm").forEach(function(btn) {
     btn.onclick = function() { removeTag(btn.getAttribute("data-tag")); };
   });
 }
 function renderTagSuggest(frequent, defaults, attached) {
+  if (currentCanEdit === false) { $("tagSuggest").innerHTML = ""; return; }
   var html = "";
   (frequent || []).forEach(function(f) {
     if (!attached[f.tag]) html += '<button type="button" class="tag-sug" data-tag="' + attrEsc(f.tag) + '">+ ' + esc(f.tag) + "（" + f.count + "次）</button>";
@@ -1493,7 +1503,7 @@ function renderTagSuggest(frequent, defaults, attached) {
   });
 }
 async function addTag(tag) {
-  if (!currentId) return;
+  if (!currentId || currentCanEdit === false) return;
   var t = (tag === undefined ? $("fTag").value : tag).trim();
   if (!t) return;
   var r = await api("/desk/records/" + currentId + "/tags", {
@@ -1509,7 +1519,7 @@ async function addTag(tag) {
   if (tag === undefined) $("fTag").value = "";
 }
 async function removeTag(tag) {
-  if (!currentId) return;
+  if (!currentId || currentCanEdit === false) return;
   var r = await api("/desk/records/" + currentId + "/tags?tag=" + encodeURIComponent(tag), { method: "DELETE" });
   if (!r.ok) return;
   var d = await r.json();
@@ -1519,7 +1529,7 @@ async function removeTag(tag) {
   renderTagSuggest(d.frequent_tags, currentDefaults, attached);
 }
 async function saveCard() {
-  if (!currentId) return;
+  if (!currentId || currentCanEdit === false) return;
   var r = await api("/desk/records/" + currentId + "/card", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ card: $("fCard").value.trim() })
@@ -1530,6 +1540,7 @@ async function saveCard() {
   $("cardMsg").textContent = d.card ? "已保存：卡号已关联到该号码" : "已清空：该号码的卡号关联已取消";
 }
 function editNotes() {
+  if (currentCanEdit === false) return;
   $("fService").disabled = false;
   $("fQuestion").disabled = false;
   var btn = $("notesBtn");
@@ -1538,7 +1549,7 @@ function editNotes() {
   btn.onclick = saveNotes;
 }
 async function saveNotes() {
-  if (!currentId) return;
+  if (!currentId || currentCanEdit === false) return;
   var st = $("fService").value, q = $("fQuestion").value;
   var r = await api("/desk/records/" + currentId + "/notes", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -1824,10 +1835,12 @@ def _history_response(rowid: int) -> dict:
 
 @app.get("/desk/records/{record_id}")
 def desk_record(request: Request, record_id: int):
-    require_seat(request)
+    seat = require_seat(request)
     rec = bridge.store.get_record(record_id)
     if not rec:
         raise HTTPException(status_code=404, detail="record not found")
+    rec["owner"] = record_owner(rec)
+    rec["can_edit"] = can_edit_record(rec, seat)
     rec["display_id"] = display_call_id(rec)
     rec["history_hint"] = bridge.record_history_hint(record_id)
     rec["history"] = _history_response(record_id)
@@ -1840,9 +1853,16 @@ async def desk_record_card(request: Request, record_id: int):
     """Set (or clear) a record's user card number. A non-empty card
     also becomes this phone's associated card; clearing drops the
     phone's association too."""
-    require_seat(request)
+    seat = require_seat(request)
     body = await request.json()
     card = (body.get("card") or "").strip()
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    if not can_edit_record(rec, seat):
+        raise HTTPException(
+            status_code=403,
+            detail="该记录归属客服" + record_owner(rec) + "，仅可查看")
     if not bridge.store.set_record_card(record_id, card):
         raise HTTPException(status_code=404, detail="record not found")
     rec = bridge.store.get_record(record_id)
@@ -1853,7 +1873,7 @@ async def desk_record_card(request: Request, record_id: int):
 
 @app.post("/desk/records/{record_id}/tags")
 async def desk_record_tag_add(request: Request, record_id: int):
-    require_seat(request)
+    seat = require_seat(request)
     body = await request.json()
     tag = (body.get("tag") or "").strip()
     if not tag:
@@ -1861,6 +1881,10 @@ async def desk_record_tag_add(request: Request, record_id: int):
     rec = bridge.store.get_record(record_id)
     if not rec:
         raise HTTPException(status_code=404, detail="record not found")
+    if not can_edit_record(rec, seat):
+        raise HTTPException(
+            status_code=403,
+            detail="该记录归属客服" + record_owner(rec) + "，仅可查看")
     bridge.store.add_record_tag(record_id, tag)
     return {"ok": True, "tags": bridge.store.get_record_tags(record_id),
             "frequent_tags": bridge.store.caller_top_tags(rec["caller"])}
@@ -1868,10 +1892,14 @@ async def desk_record_tag_add(request: Request, record_id: int):
 
 @app.delete("/desk/records/{record_id}/tags")
 async def desk_record_tag_del(request: Request, record_id: int, tag: str = ""):
-    require_seat(request)
+    seat = require_seat(request)
     rec = bridge.store.get_record(record_id)
     if not rec:
         raise HTTPException(status_code=404, detail="record not found")
+    if not can_edit_record(rec, seat):
+        raise HTTPException(
+            status_code=403,
+            detail="该记录归属客服" + record_owner(rec) + "，仅可查看")
     bridge.store.remove_record_tag(record_id, tag)
     return {"ok": True, "tags": bridge.store.get_record_tags(record_id),
             "frequent_tags": bridge.store.caller_top_tags(rec["caller"])}
@@ -1879,8 +1907,15 @@ async def desk_record_tag_del(request: Request, record_id: int, tag: str = ""):
 
 @app.post("/desk/records/{record_id}/notes")
 async def desk_record_notes(request: Request, record_id: int):
-    require_seat(request)
+    seat = require_seat(request)
     body = await request.json()
+    rec = bridge.store.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+    if not can_edit_record(rec, seat):
+        raise HTTPException(
+            status_code=403,
+            detail="该记录归属客服" + record_owner(rec) + "，仅可查看")
     ok = bridge.store.set_notes(record_id, body.get("question") or "",
                                 body.get("service_type") or "")
     if not ok:

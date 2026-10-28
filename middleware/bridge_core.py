@@ -210,6 +210,26 @@ def parse_cdr(payload: dict) -> CallRecord:
     )
 
 
+DESK_SEATS = ("8001", "8002", "8003")
+
+
+def record_owner(rec: dict, seats=DESK_SEATS) -> str:
+    """Effective owning seat of a record: the answering agent when it is
+    a real seat, else the voicemail owner seat. Anything else (missed
+    calls, FS test-agent calls) counts as unowned."""
+    agent = (rec.get("agent") or "").strip()
+    if agent in seats:
+        return agent
+    return (rec.get("owner_seat") or "").strip()
+
+
+def can_edit_record(rec: dict, seat: str, seats=DESK_SEATS) -> bool:
+    """Only the owning seat may modify a record; unowned records stay
+    editable by any seat, and every seat may always view any record."""
+    owner = record_owner(rec, seats)
+    return (not owner) or (owner == seat)
+
+
 # ------------------------------------------------------------------ storage
 
 class CallStore:
