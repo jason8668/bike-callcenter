@@ -750,10 +750,10 @@ padding:8px 16px;flex-wrap:wrap;
 background:rgba(255,255,255,.72);backdrop-filter:blur(20px) saturate(180%);
 -webkit-backdrop-filter:blur(20px) saturate(180%);
 border-bottom:1px solid rgba(0,0,0,.06)}
-.topbar .brand{font-size:17px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:center;gap:10px}
-.logo{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;flex:none;
-border-radius:10px;background:linear-gradient(135deg,#007aff,#5856d6,#ff2d55);font-size:17px;
-box-shadow:0 2px 10px rgba(88,86,214,.35)}
+.topbar .brand{font-size:19px;font-weight:600;letter-spacing:-.5px;color:#1d1d1f;display:flex;align-items:center;gap:12px}
+.logo{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;flex:none;
+border-radius:11px;background:linear-gradient(180deg,#2e9bff 0%,#007aff 45%,#5e5ce6 100%);font-size:21px;
+box-shadow:0 2px 8px rgba(0,122,255,.35),inset 0 1px 1px rgba(255,255,255,.45)}
 .topbar .spacer{flex:1}
 .pill{display:inline-block;padding:4px 13px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap}
 .pill-green{background:var(--green-bg);color:#248a3d}
