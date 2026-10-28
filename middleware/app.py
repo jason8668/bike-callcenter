@@ -120,6 +120,9 @@ def health():
     st = bridge.event_listener_status()
     if st is not None:
         out["esl_events"] = st
+    stats = bridge.event_listener_stats()
+    if stats is not None:
+        out["esl_stats"] = stats
     return out
 
 
@@ -239,6 +242,15 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
 <label>客户手机号码</label>
 <input id="fs_caller" value="13800000000">
 
+<label>接听方（只对“拨打 8000 队列”有效）</label>
+<select id="fs_answer">
+<option value="">测试坐席（无归属，不定向弹）</option>
+<option value="8001">模拟坐席 8001（走完整坐席链路）</option>
+<option value="8002">模拟坐席 8002（走完整坐席链路）</option>
+<option value="8003">模拟坐席 8003（走完整坐席链路）</option>
+</select>
+<p class="hint">模拟坐席：把该坐席的队列联系地址临时改成自动应答分机，队列来电由它“接听”，桥接事件、接通时记录、定向弹窗、话单坐席全走真链路；挂机或清理后自动恢复原地址。没有真机时就用它验收弹窗和客服归属。</p>
+
 <label>访问密钥（服务器 middleware/.env 里的 BRIDGE_SECRET）</label>
 <input id="secret" type="password" placeholder="第一次使用时粘贴一次即可">
 
@@ -301,6 +313,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
   let callHungUp = false;
   let callLive = false;
   let lastCaller = "";
+  let lastAnswerSeat = "";
   let dialEpoch = 0;
   function stopPoll() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
@@ -340,7 +353,9 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
         html += "<br>录音：暂无文件（未接通的排队呼叫没有录音文件是正常的）。";
       }
       if (final && !stale && !popSeen && rec.kind === "电话") {
-        html += "<br>接通弹屏：未触发——记录是挂机后由话单生成的，接通时没有弹出（execute_on_answer 在队列语境下可能未触发）。";
+        html += lastAnswerSeat
+          ? "<br>接通弹屏：未触发——记录是挂机后生成的，接通时没有弹出（监听器或配对未生效，查 /health 的 esl_stats）。"
+          : "<br>接通弹屏：未触发（测试坐席本来就没有归属，不会定向弹；要验弹窗请选模拟坐席）。";
       }
       showBox("fs_result", true, html);
       const btn = document.getElementById("fs_play_rec");
@@ -392,6 +407,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
     const caller = document.getElementById("fs_caller").value.trim();
     if (!caller) { setStatus("请先填客户手机号码。", false); return; }
     lastCaller = caller;
+    lastAnswerSeat = document.getElementById("fs_answer").value;
     dialEpoch = Math.floor(Date.now() / 1000);
     popSeen = false;
     callHungUp = false;
@@ -401,7 +417,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
     setStatus("正在拨打…", true);
     document.getElementById("fs_result").style.display = "none";
     try {
-      const data = await postJson("/fs-test/call", {caller: caller, target: target});
+      const data = await postJson("/fs-test/call", {caller: caller, target: target, answer_seat: lastAnswerSeat});
       showRaw(data.steps || []);
       if (data.warning) setStatus("注意：" + data.warning, false);
       if (!data.ok || !data.uuid) {
@@ -409,7 +425,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
         return;
       }
       fsUuid = data.uuid;
-      setStatus("已拨打，通话 UUID：" + fsUuid + "（正在排队等待测试坐席接听…）。", true);
+      setStatus("已拨打，通话 UUID：" + fsUuid + (lastAnswerSeat ? "（正在排队等待模拟坐席" + lastAnswerSeat + "接听…）。" : "（正在排队等待测试坐席接听…）。"), true);
       startPoll();
     } catch (e) {
       setStatus("请求失败：" + e, false);
@@ -426,7 +442,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       callHungUp = true;
       callLive = false;
       stopPoll();
-      setStatus("已挂断（测试坐席已清理）。", true);
+      setStatus("已挂断（测试坐席已清理，坐席联系地址已恢复）。", true);
       setTimeout(() => refreshResult(true), 1500);
     } catch (e) {
       setStatus("挂断请求失败：" + e, false);
@@ -446,7 +462,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
     try {
       const data = await postJson("/fs-test/cleanup", {});
       showRaw(data.steps || []);
-      setStatus("测试坐席已清理。", true);
+      setStatus("测试坐席已清理，坐席联系地址已恢复。", true);
     } catch (e) {
       setStatus("清理请求失败：" + e, false);
     }
@@ -611,7 +627,11 @@ async def fs_test_call(request: Request,
         raise HTTPException(
             status_code=400,
             detail="target must be queue, queue-noagent or voicemail")
-    return fs_test.place_fs_call(esl_command, caller, target, RECORDING_DIR)
+    answer_seat = str(body.get("answer_seat") or "")
+    if answer_seat not in ("8001", "8002", "8003"):
+        answer_seat = ""
+    return fs_test.place_fs_call(esl_command, caller, target,
+                                 RECORDING_DIR, answer_seat)
 
 
 @app.post("/fs-test/hangup")
@@ -654,7 +674,9 @@ async def fs_test_play(request: Request,
 async def fs_test_cleanup(request: Request,
                           x_bridge_secret: str | None = Header(default=None)):
     check_secret(x_bridge_secret)
-    return {"steps": fs_test.remove_test_agent(esl_command)}
+    steps = fs_test.remove_test_agent(esl_command)
+    steps += fs_test.restore_seat_contacts(esl_command)
+    return {"steps": steps}
 
 
 @app.get("/fs-test/status")

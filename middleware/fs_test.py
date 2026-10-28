@@ -48,6 +48,16 @@ TEST_AGENT_NAME = "testagent"
 TEST_AGENT_CONTACT = "loopback/8999"
 TEST_QUEUE = "客服队列"
 
+# Emulated-seat answers reuse the test agent's auto-answer extension:
+# pointing a real seat's queue contact at loopback/8999 makes the
+# queue bridge the caller to it exactly as it would to a handset, so
+# the full seat path (bridge event -> pairing -> answer-time record ->
+# directed pop -> CDR agent) runs on the cloud box with no handsets.
+# The caller leg carries cc_agent=<seat> (and so does its CDR), which
+# is what the pairing and the CDR agent fill read.
+SEAT_ANSWER_CONTACT = "loopback/8999"
+DESK_SEATS = ("8001", "8002", "8003")
+
 # Paths as FreeSWITCH sees them (shared /recordings volume). The bridge
 # writes the same basenames into RECORDING_DIR; in the deployed
 # container RECORDING_DIR is /recordings, so both sides agree.
@@ -185,13 +195,60 @@ def remove_test_agent(esl: Callable[[str], Optional[str]]) -> list:
     return steps
 
 
-def place_fs_call(esl: Callable[[str], Optional[str]], caller: str,
-                  target: str, recording_dir: str) -> dict:
-    """Generate audio, ensure the test agent, originate the test call.
+def seat_answer_steps(esl: Callable[[str], Optional[str]],
+                      seat: str) -> list:
+    """Point one real seat's queue contact at the auto-answer
+    extension and make sure it is Available, so the next queue call
+    is answered 'as' that seat. Best effort, never raises; every step
+    is reported. Also repairs a seat left On Break by an earlier *51
+    test, which would otherwise never be called by the queue."""
+    steps = []
+    for cmd in (
+        "callcenter_config agent set contact " + seat +
+        " " + SEAT_ANSWER_CONTACT,
+        "callcenter_config agent set status " + seat + " Available",
+    ):
+        try:
+            reply = esl(cmd)
+        except Exception:
+            reply = None
+        steps.append({"command": cmd,
+                      "reply": reply if reply is not None else "ESL 无响应"})
+    return steps
 
-    Returns {"ok", "uuid" | None, "error" | None, "steps", "warning"}.
-    ``steps`` carries every ESL command + verbatim reply so the test
-    page can show exactly what FreeSWITCH did.
+
+def restore_seat_contacts(esl: Callable[[str], Optional[str]],
+                          seats=DESK_SEATS) -> list:
+    """Restore every seat's queue contact to user/<seat> (best effort,
+    never raises). Runs on hangup and cleanup so an emulated-seat test
+    never leaves the production queue dialing the auto-answer
+    extension."""
+    steps = []
+    for seat in seats:
+        cmd = ("callcenter_config agent set contact " + seat +
+               " user/" + seat)
+        try:
+            reply = esl(cmd)
+        except Exception:
+            reply = None
+        steps.append({"command": cmd,
+                      "reply": reply if reply is not None else "ESL 无响应"})
+    return steps
+
+
+def place_fs_call(esl: Callable[[str], Optional[str]], caller: str,
+                  target: str, recording_dir: str,
+                  answer_seat: str = "") -> dict:
+    """Generate audio, ensure the answering side, originate the call.
+
+    answer_seat: "" (default) answers with the test agent (no seat,
+    no directed pop, by design); "8001"/"8002"/"8003" answers with
+    that seat emulated (its queue contact points at the auto-answer
+    extension, so the seat path runs end to end). Ignored unless
+    target == "queue". Returns {"ok", "uuid" | None, "error" | None,
+    "steps", "warning"}; ``steps`` carries every ESL command +
+    verbatim reply so the test page can show exactly what
+    FreeSWITCH did.
     """
     import time
     seed = int(time.time()) % 1000000
@@ -201,7 +258,14 @@ def place_fs_call(esl: Callable[[str], Optional[str]], caller: str,
                       seed + 1, 900, 1400)
     steps: list = []
     if target == "queue":
-        steps += ensure_test_agent(esl)
+        if answer_seat in DESK_SEATS:
+            # No testagent here: with fewest-calls it could steal
+            # the call from the emulated seat. Clear any stale one,
+            # then point the seat at the auto-answer extension.
+            steps += remove_test_agent(esl)
+            steps += seat_answer_steps(esl, answer_seat)
+        else:
+            steps += ensure_test_agent(esl)
         if any(s["reply"] == "ESL 无响应" for s in steps):
             return {"ok": False, "uuid": None,
                     "error": "话务层未连接（ESL 无响应）：FreeSWITCH 可能未运行，"
@@ -230,12 +294,14 @@ def place_fs_call(esl: Callable[[str], Optional[str]], caller: str,
 
 
 def hangup_fs_call(esl: Callable[[str], Optional[str]], uuid: str) -> dict:
-    """Kill the test call and remove the test agent. Never raises."""
+    """Kill the test call, remove the test agent, and restore every
+    seat's queue contact. Never raises."""
     steps = []
     reply = esl("uuid_kill " + uuid)
     steps.append({"command": "uuid_kill " + uuid,
                   "reply": reply if reply is not None else "ESL 无响应"})
     steps += remove_test_agent(esl)
+    steps += restore_seat_contacts(esl)
     return {"ok": True, "steps": steps}
 
 

@@ -203,6 +203,10 @@ class TestBridgeEventPairing(unittest.TestCase):
         self.assertEqual(bridge.store.agent_for_call("uuid-caller"),
                          "8002")
         self.assertEqual(subscribe_lines, ["event plain CHANNEL_BRIDGE"])
+        self.assertEqual(listener.events_seen, 2)
+        self.assertEqual(listener.pairs_resolved, 1)
+        self.assertEqual(listener.mapped, 1)
+        self.assertEqual(listener.live_queued, 1)
         item = live.get(timeout=2)
         self.assertEqual(item["call_id"], "uuid-caller")
         self.assertEqual(item["seat"], "8002")

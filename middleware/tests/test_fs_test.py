@@ -155,6 +155,45 @@ class TestPlaceCall(unittest.TestCase):
         self.assertIsNone(result["uuid"])
         self.assertIn("NO_ROUTE", result["error"])
 
+    def test_seat_answer_steps(self):
+        esl = FakeEsl({})
+        steps = fs_test.seat_answer_steps(esl, "8002")
+        self.assertEqual([s["command"] for s in steps], [
+            "callcenter_config agent set contact 8002 loopback/8999",
+            "callcenter_config agent set status 8002 Available",
+        ])
+
+    def test_restore_seat_contacts(self):
+        esl = FakeEsl({})
+        steps = fs_test.restore_seat_contacts(esl)
+        self.assertEqual([s["command"] for s in steps], [
+            "callcenter_config agent set contact 8001 user/8001",
+            "callcenter_config agent set contact 8002 user/8002",
+            "callcenter_config agent set contact 8003 user/8003",
+        ])
+
+    def test_place_call_seat_answer(self):
+        esl = FakeEsl({"originate": "+OK call-uuid-1\n"})
+        with tempfile.TemporaryDirectory() as d:
+            result = fs_test.place_fs_call(esl, "13800000000", "queue",
+                                           d, answer_seat="8002")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["uuid"], "call-uuid-1")
+        self.assertTrue(any("agent set contact 8002 loopback/8999" in c
+                            for c in esl.commands))
+        self.assertTrue(any("agent set status 8002 Available" in c
+                            for c in esl.commands))
+        # No testagent: with fewest-calls it could steal the call
+        # from the emulated seat.
+        self.assertFalse(any("agent add testagent" in c
+                             for c in esl.commands))
+
+    def test_hangup_restores_seats(self):
+        esl = FakeEsl({"uuid_kill": "+OK"})
+        fs_test.hangup_fs_call(esl, "u9")
+        self.assertTrue(any("agent set contact 8002 user/8002" in c
+                            for c in esl.commands))
+
     def test_hangup_and_play(self):
         esl = FakeEsl({"uuid_kill": "+OK", "uuid_broadcast": "+OK"})
         res = fs_test.hangup_fs_call(esl, "u9")

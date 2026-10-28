@@ -1185,6 +1185,13 @@ class BridgeEventListener:
         self.pairing = BridgeEventPairing(seats)
         self.connected = False
         self.mapped = 0
+        # Counts only (no call data): CHANNEL_BRIDGE events seen,
+        # bridges resolved, seat mappings persisted, live records
+        # queued. /health exposes them so a silent listener is
+        # distinguishable from a pairing miss without logging events.
+        self.events_seen = 0
+        self.pairs_resolved = 0
+        self.live_queued = 0
         self._stop = threading.Event()
 
     def start(self) -> None:
@@ -1290,8 +1297,10 @@ class BridgeEventListener:
                                 headers[k.strip()] = v.strip()
                 if headers.get("Event-Name") != "CHANNEL_BRIDGE":
                     continue
+                self.events_seen += 1
                 resolved = self.pairing.note(headers)
                 if resolved:
+                    self.pairs_resolved += 1
                     call_id, seat, caller = resolved
                     if seat:
                         self._persist(call_id, seat)
@@ -1301,6 +1310,7 @@ class BridgeEventListener:
                             "call_id": call_id, "seat": seat or "",
                             "caller": caller,
                             "started_at": event_ts(headers)})
+                        self.live_queued += 1
         finally:
             self.connected = False
             try:
@@ -1356,6 +1366,17 @@ class Bridge:
         if self._event_listener is None:
             return None
         return self._event_listener.status()
+
+    def event_listener_stats(self) -> Optional[dict]:
+        """None when disabled, else the listener's counters (counts
+        only, no call data) for /health."""
+        listener = self._event_listener
+        if listener is None:
+            return None
+        return {"events": listener.events_seen,
+                "pairs": listener.pairs_resolved,
+                "mapped": listener.mapped,
+                "live": listener.live_queued}
 
     def _agent_statuses(self) -> dict:
         """Seat -> FreeSWITCH agent status (Available / On Call /
