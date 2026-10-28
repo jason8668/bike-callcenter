@@ -20,6 +20,7 @@ import hashlib
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
@@ -325,6 +326,13 @@ class CallStore:
                 " record_id INTEGER, tag TEXT,"
                 " PRIMARY KEY(record_id, tag))"
             )
+            # Caller -> answering-seat mappings learned from live
+            # bridge events (the queue CDR carries no seat).
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS call_agents ("
+                "call_id TEXT PRIMARY KEY, seat TEXT NOT NULL, "
+                "created_at REAL NOT NULL)"
+            )
             # card_no on the record itself: the card shown for this
             # call (auto-carried from caller_cards at creation, or set
             # by the agent on the detail page).
@@ -335,6 +343,28 @@ class CallStore:
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
+
+    def note_agent(self, call_id: str, seat: str) -> None:
+        """Persist a caller -> answering-seat mapping learned from a
+        live bridge event (first bridge wins)."""
+        with self._conn() as c:
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS call_agents ("
+                "call_id TEXT PRIMARY KEY, seat TEXT NOT NULL, "
+                "created_at REAL NOT NULL)")
+            c.execute("INSERT OR IGNORE INTO call_agents VALUES (?, ?, ?)",
+                      (call_id, seat, time.time()))
+
+    def agent_for_call(self, call_id: str) -> str:
+        """Answering seat learned from a live bridge event, or ""."""
+        with self._conn() as c:
+            try:
+                row = c.execute(
+                    "SELECT seat FROM call_agents WHERE call_id = ?",
+                    (call_id,)).fetchone()
+            except sqlite3.OperationalError:
+                return ""  # table predates this build (old database)
+        return row[0] if row else ""
 
     def get_record_rowid(self, call_id: str) -> Optional[int]:
         """Rowid of the record row for this CallID, if one exists."""
@@ -984,6 +1014,238 @@ def summarize_call_history(rows: list) -> str:
 
 # ------------------------------------------------------------------ bridge
 
+# ------------------------------------------------------- ESL live events
+# Queue CDRs do not carry the answering seat (no cc_agent on the caller
+# leg - proven by the 2026-10-28 16:09:51 record: caller + notes + tag
+# present, agent empty), so the bridge learns it from FreeSWITCH live
+# events. When a queue caller bridges to an agent, CHANNEL_BRIDGE fires
+# for both legs: the caller leg carries bridge_ticket=1, the agent leg's
+# channel identity (sofia/internal/8002@... / destination 8002) maps to
+# a seat. The mapping is persisted in call_agents (the listener keeps
+# its own SQLite connection: the store's connection belongs to the
+# request thread) and handle_cdr consults it when the CDR itself has no
+# agent. Event payloads are never logged: bridge headers carry caller
+# numbers. Fail-soft: ESL down just means reconnect retries; the bridge
+# keeps serving and CDRs keep arriving seat-less, as today.
+
+ESL_EVENT_SUBSCRIPTION = "CHANNEL_BRIDGE"
+
+
+def _esl_password() -> str:
+    """Same source as esl_command: ESL_PASSWORD, else the server-side
+    freeswitch/esl-password.txt (never in Git)."""
+    pw = os.environ.get("ESL_PASSWORD", "")
+    if pw:
+        return pw
+    try:
+        with open("/freeswitch-config/esl-password.txt") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def explicit_agent(headers: dict, seats=DESK_SEATS) -> Optional[str]:
+    """The cc_agent variable, when it names a real seat. This is the
+    only agent hint trusted on the caller leg itself: the caller leg's
+    channel name identifies the CALLER, not the agent."""
+    cc = (headers.get("variable_cc_agent", "") or "").strip()
+    return cc if cc in seats else None
+
+
+def leg_seat(headers: dict, seats=DESK_SEATS) -> Optional[str]:
+    """Seat number for an agent leg, from its channel identity hints.
+    The seat must match as a full segment ("/8002@" or exact "8002"),
+    never as a substring, so 80011 never matches 8001."""
+    seat = explicit_agent(headers, seats)
+    if seat:
+        return seat
+    candidates = [
+        headers.get("Caller-Destination-Number", ""),
+        headers.get("variable_sip_to_user", ""),
+        headers.get("variable_dialed_user", ""),
+        headers.get("Channel-Name", ""),
+    ]
+    for c in candidates:
+        c = (c or "").strip()
+        if not c:
+            continue
+        for seat in seats:
+            if c == seat or ("/" + seat + "@" in c) or \
+                    c.endswith("/" + seat) or ("/" + seat + "/" in c):
+                return seat
+    return None
+
+
+class BridgeEventPairing:
+    """Pairs CHANNEL_BRIDGE legs into caller -> seat mappings.
+
+    Pure logic over event headers (no socket, no DB) so it can be unit
+    tested with canned events. The caller leg is the one with
+    bridge_ticket=1; the peer leg's channel identity maps to a seat.
+    Unpaired legs are kept up to an hour (a bridge pair can straddle a
+    slow leg) and then dropped."""
+
+    def __init__(self, seats=DESK_SEATS):
+        self.seats = tuple(seats)
+        self.legs = {}  # leg uuid -> (peer uuid, is_caller, seat|None, at)
+
+    def note(self, headers: dict):
+        """Feed one CHANNEL_BRIDGE event; returns (call_id, seat) when
+        a pair resolves, else None."""
+        leg = headers.get("Unique-ID", "")
+        if not leg:
+            return None
+        a = headers.get("Bridge-A-Unique-ID", "")
+        b = headers.get("Bridge-B-Unique-ID", "")
+        peer = a if (a and a != leg) else (b if (b and b != leg) else "")
+        is_caller = headers.get("variable_bridge_ticket", "") in ("1", "true")
+        # The caller leg's own channel name identifies the caller, so
+        # only an explicit cc_agent counts there; the peer leg's
+        # identity is the agent's channel and may be inferred.
+        seat = explicit_agent(headers, self.seats) if is_caller \
+            else leg_seat(headers, self.seats)
+        now = time.time()
+        self.legs[leg] = (peer, is_caller, seat, now)
+        for k in [k for k, v in self.legs.items() if now - v[3] > 3600]:
+            del self.legs[k]
+        if is_caller and seat:
+            # The caller leg itself names its agent; no peer needed.
+            del self.legs[leg]
+            return (leg, seat)
+        if not peer or peer not in self.legs:
+            return None
+        _, peer_caller, peer_seat, _ = self.legs[peer]
+        resolved = None
+        if is_caller and peer_seat:
+            resolved = (leg, peer_seat)
+        elif seat and peer_caller:
+            resolved = (peer, seat)
+        if resolved:
+            del self.legs[leg]
+            self.legs.pop(peer, None)
+        return resolved
+
+
+class BridgeEventListener:
+    """Background ESL event subscription feeding BridgeEventPairing."""
+
+    def __init__(self, db_path: str, host: Optional[str] = None,
+                 port: Optional[int] = None, password: Optional[str] = None,
+                 seats=DESK_SEATS):
+        self.db_path = db_path
+        self.host = host or os.environ.get("ESL_HOST", "127.0.0.1")
+        try:
+            self.port = port or int(os.environ.get("ESL_PORT", "8021"))
+        except ValueError:
+            self.port = 8021
+        self.password = password
+        self.pairing = BridgeEventPairing(seats)
+        self.connected = False
+        self.mapped = 0
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True,
+                         name="esl-events").start()
+
+    def status(self) -> str:
+        return "connected" if self.connected else "down"
+
+    def _persist(self, call_id: str, seat: str) -> None:
+        try:
+            with sqlite3.connect(self.db_path, timeout=30) as c:
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS call_agents ("
+                    "call_id TEXT PRIMARY KEY, seat TEXT NOT NULL, "
+                    "created_at REAL NOT NULL)")
+                c.execute(
+                    "INSERT OR IGNORE INTO call_agents VALUES (?, ?, ?)",
+                    (call_id, seat, time.time()))
+        except sqlite3.Error:
+            pass  # mapping loss degrades to today's seat-less behavior
+
+    def _run(self) -> None:
+        delay = 2.0
+        while not self._stop.is_set():
+            try:
+                self._serve()
+                delay = 2.0
+            except Exception:
+                self.connected = False
+                self._stop.wait(delay)
+                delay = min(delay * 2, 60.0)
+
+    def _serve(self) -> None:
+        import socket
+        sock = socket.create_connection((self.host, self.port), timeout=5)
+        buf = b""
+
+        def read_block() -> bytes:
+            nonlocal buf
+            while b"\n\n" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("esl closed")
+                buf += chunk
+            head, buf = buf.split(b"\n\n", 1)
+            return head
+
+        def drain(length: int) -> None:
+            nonlocal buf
+            while len(buf) < length:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("esl closed")
+                buf += chunk
+            buf = buf[length:]
+
+        try:
+            read_block()  # auth/request banner
+            pw = self.password or _esl_password()
+            if not pw:
+                raise ConnectionError("no esl password")
+            sock.sendall(f"auth {pw}\n\n".encode())
+            if b"+OK" not in read_block():
+                raise ConnectionError("esl auth rejected")
+            sock.sendall(
+                f"events plain {ESL_EVENT_SUBSCRIPTION}\n\n".encode())
+            if b"+OK" not in read_block():
+                raise ConnectionError("esl subscribe rejected")
+            self.connected = True
+            sock.settimeout(30)
+            while not self._stop.is_set():
+                try:
+                    head = read_block()
+                except socket.timeout:
+                    continue
+                headers = {}
+                for line in head.decode(errors="replace").splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        headers[k.strip()] = v.strip()
+                length = 0
+                raw_len = headers.get("Content-Length", "")
+                if raw_len.isdigit():
+                    length = int(raw_len)
+                if length:
+                    try:
+                        drain(length)
+                    except socket.timeout:
+                        continue
+                if headers.get("Event-Name") != "CHANNEL_BRIDGE":
+                    continue
+                resolved = self.pairing.note(headers)
+                if resolved:
+                    self._persist(resolved[0], resolved[1])
+                    self.mapped += 1
+        finally:
+            self.connected = False
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
 @dataclass
 class Bridge:
     store: CallStore
@@ -992,6 +1254,22 @@ class Bridge:
     # member with the fewest handled contacts; seat numbers must match
     # the FreeSWITCH extensions so queue CDRs (cc_agent) line up.
     rotation_agents: list = field(default_factory=list)
+    # Off by default (unit tests must not spawn threads); the server
+    # enables it so queue calls learn their answering seat live.
+    enable_event_listener: bool = False
+
+    def __post_init__(self):
+        self._event_listener = None
+        if self.enable_event_listener:
+            self._event_listener = BridgeEventListener(self.store.db_path)
+            self._event_listener.start()
+
+    def event_listener_status(self) -> Optional[str]:
+        """None when disabled, else the listener's ESL state
+        ("connected" / "down") for /health."""
+        if self._event_listener is None:
+            return None
+        return self._event_listener.status()
 
     def _agent_statuses(self) -> dict:
         """Seat -> FreeSWITCH agent status (Available / On Call /
@@ -1239,6 +1517,11 @@ class Bridge:
         rec = parse_cdr(payload)
         if not rec.call_id:
             return {"ok": False, "error": "missing call_id/uuid"}
+        # The queue CDR carries no answering seat, so fall back to the
+        # seat learned from the live bridge event (never overrides a
+        # seat the CDR itself names).
+        if not rec.agent:
+            rec.agent = self.store.agent_for_call(rec.call_id)
         # 1) missed queue call -> kept as a record (kind 未接）, so the
         # callback list is visible; it never counts as answered.
         if not rec.answered and rec.ticket_flag:

@@ -1,13 +1,17 @@
 import os
+import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from bridge_core import (Bridge, CallRecord, CallStore,  # noqa: E402
-                         can_edit_record, fmt_cst, fmt_duration, parse_cdr,
-                         record_owner, summarize_call_history)
+from bridge_core import (Bridge, BridgeEventListener,  # noqa: E402
+                         BridgeEventPairing, CallRecord, CallStore,
+                         can_edit_record, explicit_agent, fmt_cst,
+                         fmt_duration, leg_seat, parse_cdr, record_owner,
+                         summarize_call_history)
 
 CDR = {
     "uuid": "abc-123", "caller_id_number": "13800000000",
@@ -51,6 +55,130 @@ class TestParse(unittest.TestCase):
         self.assertEqual(rec.caller, "13700000000")
 
 
+CALLER_EV = {"Unique-ID": "uuid-caller",
+             "Bridge-A-Unique-ID": "uuid-caller",
+             "Bridge-B-Unique-ID": "uuid-agent",
+             "variable_bridge_ticket": "1"}
+AGENT_EV = {"Unique-ID": "uuid-agent",
+            "Bridge-A-Unique-ID": "uuid-caller",
+            "Bridge-B-Unique-ID": "uuid-agent",
+            "Channel-Name": "sofia/internal/8002@192.168.0.87",
+            "Caller-Destination-Number": "8002"}
+
+
+class TestBridgeEventPairing(unittest.TestCase):
+    def test_caller_then_agent_resolves(self):
+        p = BridgeEventPairing()
+        self.assertIsNone(p.note(dict(CALLER_EV)))
+        self.assertEqual(p.note(dict(AGENT_EV)), ("uuid-caller", "8002"))
+
+    def test_agent_then_caller_resolves(self):
+        p = BridgeEventPairing()
+        self.assertIsNone(p.note(dict(AGENT_EV)))
+        self.assertEqual(p.note(dict(CALLER_EV)), ("uuid-caller", "8002"))
+
+    def test_internal_call_never_maps(self):
+        p = BridgeEventPairing()
+        a = {"Unique-ID": "u1", "Bridge-A-Unique-ID": "u1",
+             "Bridge-B-Unique-ID": "u2",
+             "Channel-Name": "sofia/internal/8001@192.168.0.87"}
+        b = {"Unique-ID": "u2", "Bridge-A-Unique-ID": "u1",
+             "Bridge-B-Unique-ID": "u2",
+             "Channel-Name": "sofia/internal/8002@192.168.0.87"}
+        self.assertIsNone(p.note(a))
+        self.assertIsNone(p.note(b))
+
+    def test_testagent_leg_maps_nothing(self):
+        p = BridgeEventPairing()
+        agent = dict(AGENT_EV, **{"Channel-Name": "loopback/8999",
+                                  "Caller-Destination-Number": "8999"})
+        self.assertIsNone(p.note(dict(CALLER_EV)))
+        self.assertIsNone(p.note(agent))
+
+    def test_caller_cc_agent_resolves_alone(self):
+        p = BridgeEventPairing()
+        caller = dict(CALLER_EV, variable_cc_agent="8001")
+        self.assertEqual(p.note(caller), ("uuid-caller", "8001"))
+
+    def test_leg_seat_matching(self):
+        self.assertEqual(
+            leg_seat({"Channel-Name": "sofia/internal/8002@192.168.0.87"}),
+            "8002")
+        self.assertEqual(
+            leg_seat({"Caller-Destination-Number": "8003"}), "8003")
+        self.assertIsNone(leg_seat({"Channel-Name": "loopback/8999"}))
+        self.assertIsNone(leg_seat({"Channel-Name": "loopback/8000"}))
+        # Substring trap: 80011 must not match 8001.
+        self.assertIsNone(
+            leg_seat({"Channel-Name": "sofia/internal/80011@x"}))
+        self.assertEqual(
+            explicit_agent({"variable_cc_agent": "8001"}), "8001")
+        self.assertIsNone(
+            explicit_agent({"variable_cc_agent": "testagent"}))
+
+    def test_listener_against_fake_esl(self):
+        # End-to-end wire check: banner, auth, subscribe, two plain
+        # bridge events -> the mapping lands in the store.
+        tmp = tempfile.mkdtemp()
+        bridge = make_bridge(tmp)
+        port_holder = []
+
+        def fake_esl():
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.1", 0))
+            port_holder.append(srv.getsockname()[1])
+            srv.listen(1)
+            conn, _ = srv.accept()
+            conn.sendall(b"Content-Type: auth/request\n\n")
+            buf = b""
+            while b"\n\n" not in buf:
+                buf += conn.recv(4096)
+            conn.sendall(b"Content-Type: command/reply\n"
+                         b"Reply-Text: +OK accepted\n\n")
+            buf = b""
+            while b"\n\n" not in buf:
+                buf += conn.recv(4096)
+            conn.sendall(b"Content-Type: command/reply\n"
+                         b"Reply-Text: +OK accepted\n\n")
+            caller_block = (
+                b"Content-Type: text/event-plain\n"
+                b"Event-Name: CHANNEL_BRIDGE\n"
+                b"Unique-ID: uuid-caller\n"
+                b"Bridge-A-Unique-ID: uuid-caller\n"
+                b"Bridge-B-Unique-ID: uuid-agent\n"
+                b"variable_bridge_ticket: 1\n\n")
+            agent_block = (
+                b"Content-Type: text/event-plain\n"
+                b"Event-Name: CHANNEL_BRIDGE\n"
+                b"Unique-ID: uuid-agent\n"
+                b"Bridge-A-Unique-ID: uuid-caller\n"
+                b"Bridge-B-Unique-ID: uuid-agent\n"
+                b"Channel-Name: sofia/internal/8002@192.168.0.87\n"
+                b"Caller-Destination-Number: 8002\n\n")
+            conn.sendall(caller_block + agent_block)
+            time.sleep(0.5)
+            conn.close()
+            srv.close()
+
+        threading.Thread(target=fake_esl, daemon=True).start()
+        deadline = time.time() + 5
+        while not port_holder and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(port_holder, "fake ESL never bound")
+        listener = BridgeEventListener(
+            bridge.store.db_path, host="127.0.0.1",
+            port=port_holder[0], password="test")
+        listener.start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if bridge.store.agent_for_call("uuid-caller") == "8002":
+                break
+            time.sleep(0.05)
+        self.assertEqual(bridge.store.agent_for_call("uuid-caller"),
+                         "8002")
+
+
 def make_bridge(tmp, roster=None):
     return Bridge(store=CallStore(os.path.join(tmp, "b.db")),
                   rotation_agents=roster if roster is not None
@@ -88,6 +216,24 @@ class TestBridge(unittest.TestCase):
                                     cc_agent="8002"))
         rows = self.bridge.store.recent_records(10)
         self.assertEqual(rows[0]["agent"], "8002")
+
+    def test_cdr_agent_from_live_bridge_event(self):
+        # The queue CDR carries no seat; the live bridge event mapping
+        # fills it, and a CDR-named seat still wins over the mapping.
+        self.bridge.store.note_agent("abc-123", "8002")
+        out = self.bridge.handle_cdr(dict(CDR))
+        rec = self.bridge.store.get_record(out["record_id"])
+        self.assertEqual(rec["agent"], "8002")
+        self.bridge.store.note_agent("abc-124", "8002")
+        out = self.bridge.handle_cdr(dict(CDR, uuid="abc-124",
+                                          cc_agent="8001"))
+        rec = self.bridge.store.get_record(out["record_id"])
+        self.assertEqual(rec["agent"], "8001")
+
+    def test_cdr_agent_empty_without_mapping(self):
+        out = self.bridge.handle_cdr(dict(CDR))
+        rec = self.bridge.store.get_record(out["record_id"])
+        self.assertEqual(rec["agent"], "")
 
     def test_record_owner_and_edit_permission(self):
         # Only the owning seat may modify; others view only.

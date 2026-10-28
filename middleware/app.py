@@ -53,6 +53,7 @@ _ROTATION_AGENTS = [a.strip() for a in
 bridge = Bridge(
     store=CallStore(DB_PATH),
     rotation_agents=_ROTATION_AGENTS,
+    enable_event_listener=True,
 )
 
 # Default user tags offered as one-click chips on every record
@@ -115,7 +116,11 @@ def check_secret(x_bridge_secret: str | None, alt_secret: str | None = None):
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    out = {"ok": True}
+    st = bridge.event_listener_status()
+    if st is not None:
+        out["esl_events"] = st
+    return out
 
 
 @app.post("/events/call")
