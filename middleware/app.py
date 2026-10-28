@@ -814,6 +814,9 @@ border-radius:999px;padding:6px 14px;font-size:14px}
 .seat-note{color:var(--muted);font-size:13px;margin-top:10px;line-height:1.6}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
 .dot-green{background:#34c759}.dot-amber{background:#ff9500}.dot-gray{background:#8a8a8e}
+.topbar .seats{gap:6px}
+.topbar .seat-chip{padding:3px 10px;font-size:12px}
+.topbar .dot{width:7px;height:7px;margin-right:5px}
 .stats{display:flex;gap:28px;margin-bottom:8px}
 .stat b{font-size:28px;display:block;letter-spacing:-.5px}
 .stat-blue b{color:#007aff}
@@ -978,6 +981,7 @@ def desk_page_html(seat: str) -> str:
 <div class="topbar">
   <div class="brand"><span class="logo">🚲</span> 自行车客服工作台</div>
   <div class="spacer"></div>
+  <div id="seatStrip" class="seats" title="状态由登录自动决定：登录即空闲，自己置忙变置忙，退出变离线"><span style="color:var(--muted)">加载中…</span></div>
   <span>客服 <b id="seatLabel">__SEAT__</b></span>
   <span id="statusPill" class="pill pill-gray">未知</span>
   <label class="switch-wrap"><span>接单</span><span class="switch"><input type="checkbox" id="busySwitch" checked><span class="slider"></span></span></label>
@@ -991,7 +995,7 @@ def desk_page_html(seat: str) -> str:
     <button class="btn btn-sm btn-ghost" style="float:right"
       onclick="document.getElementById('alert').classList.remove('show')">知道了</button>
   </div>
-  <div id="queueWarn" class="queue-warn">⚠️ 话务层未连接：下面坐席状态是按系统登录状态显示的（登录即空闲，置忙即置忙）；电话实际分流要等话务层恢复后才生效。记录、补填、导出都正常。</div>
+  <div id="queueWarn" class="queue-warn">⚠️ 话务层未连接：顶部坐席状态是按系统登录状态显示的（登录即空闲，置忙即置忙）；电话实际分流要等话务层恢复后才生效。记录、补填、导出都正常。</div>
   <div class="grid">
     <div class="card list-col">
       <h2>通话记录</h2>
@@ -1024,11 +1028,6 @@ def desk_page_html(seat: str) -> str:
         <div id="customerPortrait"><span style="color:var(--muted)">打开一条记录后显示该客户的画像。</span></div>
         <div id="callerHistory"><span style="color:var(--muted)">打开一条记录后显示该客户的历史。</span></div>
         <audio id="histAudio" controls style="width:100%;display:none;margin-top:8px"></audio>
-      </div>
-      <div class="card">
-        <h2>坐席状态</h2>
-        <div id="seatStrip" class="seats"><span style="color:var(--muted)">加载中…</span></div>
-        <div class="seat-note">状态由登录自动决定，不用选也不能改别人的：登录即空闲，自己置忙变置忙，退出变离线。</div>
       </div>
       <div class="card">
         <h2>我的统计</h2>
