@@ -1,4 +1,5 @@
 import os
+import queue
 import socket
 import sys
 import tempfile
@@ -70,12 +71,22 @@ class TestBridgeEventPairing(unittest.TestCase):
     def test_caller_then_agent_resolves(self):
         p = BridgeEventPairing()
         self.assertIsNone(p.note(dict(CALLER_EV)))
-        self.assertEqual(p.note(dict(AGENT_EV)), ("uuid-caller", "8002"))
+        self.assertEqual(p.note(dict(AGENT_EV)),
+                         ("uuid-caller", "8002", ""))
 
     def test_agent_then_caller_resolves(self):
         p = BridgeEventPairing()
         self.assertIsNone(p.note(dict(AGENT_EV)))
-        self.assertEqual(p.note(dict(CALLER_EV)), ("uuid-caller", "8002"))
+        self.assertEqual(p.note(dict(CALLER_EV)),
+                         ("uuid-caller", "8002", ""))
+
+    def test_pairing_carries_caller_from_event(self):
+        p = BridgeEventPairing()
+        caller = dict(CALLER_EV,
+                      variable_origination_caller_id_number="13811223355")
+        self.assertIsNone(p.note(caller))
+        self.assertEqual(p.note(dict(AGENT_EV)),
+                         ("uuid-caller", "8002", "13811223355"))
 
     def test_internal_call_never_maps(self):
         p = BridgeEventPairing()
@@ -88,17 +99,19 @@ class TestBridgeEventPairing(unittest.TestCase):
         self.assertIsNone(p.note(a))
         self.assertIsNone(p.note(b))
 
-    def test_testagent_leg_maps_nothing(self):
+    def test_testagent_leg_maps_no_seat(self):
+        # The bridge still happened, so the caller gets an answer-time
+        # record - just with no owner (test records stay editable).
         p = BridgeEventPairing()
         agent = dict(AGENT_EV, **{"Channel-Name": "loopback/8999",
                                   "Caller-Destination-Number": "8999"})
         self.assertIsNone(p.note(dict(CALLER_EV)))
-        self.assertIsNone(p.note(agent))
+        self.assertEqual(p.note(agent), ("uuid-caller", None, ""))
 
     def test_caller_cc_agent_resolves_alone(self):
         p = BridgeEventPairing()
         caller = dict(CALLER_EV, variable_cc_agent="8001")
-        self.assertEqual(p.note(caller), ("uuid-caller", "8001"))
+        self.assertEqual(p.note(caller), ("uuid-caller", "8001", ""))
 
     def test_leg_seat_matching(self):
         self.assertEqual(
@@ -166,9 +179,10 @@ class TestBridgeEventPairing(unittest.TestCase):
         while not port_holder and time.time() < deadline:
             time.sleep(0.05)
         self.assertTrue(port_holder, "fake ESL never bound")
+        live = queue.Queue()
         listener = BridgeEventListener(
             bridge.store.db_path, host="127.0.0.1",
-            port=port_holder[0], password="test")
+            port=port_holder[0], password="test", live_queue=live)
         listener.start()
         deadline = time.time() + 5
         while time.time() < deadline:
@@ -177,6 +191,9 @@ class TestBridgeEventPairing(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(bridge.store.agent_for_call("uuid-caller"),
                          "8002")
+        item = live.get(timeout=2)
+        self.assertEqual(item["call_id"], "uuid-caller")
+        self.assertEqual(item["seat"], "8002")
 
 
 def make_bridge(tmp, roster=None):
@@ -229,6 +246,41 @@ class TestBridge(unittest.TestCase):
                                           cc_agent="8001"))
         rec = self.bridge.store.get_record(out["record_id"])
         self.assertEqual(rec["agent"], "8001")
+
+    def test_save_call_fills_empty_caller_and_keeps_agent(self):
+        # Answer-time record from a bridge event (no caller yet, seat
+        # known); the hangup CDR completes it without clobbering.
+        rec = CallRecord(call_id="live-1", caller="", direction="in",
+                         answered=True, agent="8002", ticket_flag=True)
+        rowid = self.bridge.store.save_call(rec, True, kind="电话")
+        out = self.bridge.handle_cdr(dict(
+            CDR, uuid="live-1", caller_id_number="13811223355",
+            billsec="20", duration="25"))
+        self.assertEqual(out["record_id"], rowid)
+        got = self.bridge.store.get_record(rowid)
+        self.assertEqual(got["caller"], "13811223355")
+        self.assertEqual(got["agent"], "8002")
+        # A later empty-caller leg must not wipe either field.
+        self.bridge.handle_cdr(dict(
+            CDR, uuid="live-1", caller_id_number="",
+            billsec="20", duration="25"))
+        got = self.bridge.store.get_record(rowid)
+        self.assertEqual(got["caller"], "13811223355")
+        self.assertEqual(got["agent"], "8002")
+
+    def test_drain_live_calls_creates_answer_time_record(self):
+        bridge = self.bridge
+        bridge.live_calls.put({"call_id": "live-2", "seat": "8001",
+                               "caller": "13811223355",
+                               "started_at": 1792800000})
+        bridge.drain_live_calls()
+        rows = bridge.store.recent_records(10)
+        self.assertEqual(rows[0]["call_id"], "live-2")
+        self.assertEqual(rows[0]["agent"], "8001")
+        self.assertEqual(rows[0]["caller"], "13811223355")
+        # Draining again is a no-op (queue empty, upsert idempotent).
+        bridge.drain_live_calls()
+        self.assertEqual(len(bridge.store.recent_records(10)), 1)
 
     def test_cdr_agent_empty_without_mapping(self):
         out = self.bridge.handle_cdr(dict(CDR))

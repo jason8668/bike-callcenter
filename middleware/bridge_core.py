@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import queue
 import secrets
 import sqlite3
 import threading
@@ -550,7 +551,10 @@ class CallStore:
         when is_record is set (queue leg or voicemail); statistics legs
         keep is_record=0 and never appear in the record list. Notes
         (question/service_type) are only ever written by set_notes, so
-        a late CDR can never wipe what the agent typed. Returns rowid."""
+        a late CDR can never wipe what the agent typed. Caller and
+        agent are fill-only when already set: an answer-time record
+        created from a bridge event (caller/agent possibly empty) is
+        completed - never clobbered - by the hangup CDR. Returns rowid."""
         # New records auto-carry this phone's associated card number
         # (set by an agent on an earlier record); the upsert below
         # never overwrites a record's own card afterwards.
@@ -563,8 +567,12 @@ class CallStore:
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(call_id) DO UPDATE SET"
                 " callee=excluded.callee,"
+                " caller=CASE WHEN calls.caller = '' THEN excluded.caller"
+                " ELSE calls.caller END,"
                 " answered=excluded.answered, duration_sec=excluded.duration_sec,"
-                " wait_sec=excluded.wait_sec, agent=excluded.agent,"
+                " wait_sec=excluded.wait_sec,"
+                " agent=CASE WHEN excluded.agent != '' THEN excluded.agent"
+                " ELSE calls.agent END,"
                 " is_record=MAX(calls.is_record, excluded.is_record),"
                 " kind=CASE WHEN excluded.kind != '' THEN excluded.kind ELSE calls.kind END,"
                 " recording_path=CASE WHEN excluded.recording_path != ''"
@@ -1076,6 +1084,20 @@ def leg_seat(headers: dict, seats=DESK_SEATS) -> Optional[str]:
     return None
 
 
+def event_caller(headers: dict) -> str:
+    """Caller number from a bridge event's headers, same fallback chain
+    as the CDR parser: the loopback/queue leg may leave the plain caller
+    ID empty while the effective/originate IDs carry the number."""
+    for key in ("variable_caller_id_number", "Caller-Caller-ID-Number",
+                "variable_sip_from_user",
+                "variable_effective_caller_id_number",
+                "variable_origination_caller_id_number"):
+        v = (headers.get(key, "") or "").strip()
+        if v:
+            return v
+    return ""
+
+
 class BridgeEventPairing:
     """Pairs CHANNEL_BRIDGE legs into caller -> seat mappings.
 
@@ -1087,11 +1109,15 @@ class BridgeEventPairing:
 
     def __init__(self, seats=DESK_SEATS):
         self.seats = tuple(seats)
-        self.legs = {}  # leg uuid -> (peer uuid, is_caller, seat|None, at)
+        # leg uuid -> (peer uuid, is_caller, seat|None, at, caller)
+        self.legs = {}
 
     def note(self, headers: dict):
-        """Feed one CHANNEL_BRIDGE event; returns (call_id, seat) when
-        a pair resolves, else None."""
+        """Feed one CHANNEL_BRIDGE event; returns (call_id, seat|None,
+        caller) when a bridge resolves, else None. seat is None when
+        the caller bridged to a non-seat leg (e.g. the FS test agent):
+        the bridge still happened, so the caller still gets an
+        answer-time record, just with no owner."""
         leg = headers.get("Unique-ID", "")
         if not leg:
             return None
@@ -1104,26 +1130,40 @@ class BridgeEventPairing:
         # identity is the agent's channel and may be inferred.
         seat = explicit_agent(headers, self.seats) if is_caller \
             else leg_seat(headers, self.seats)
+        caller = event_caller(headers)
         now = time.time()
-        self.legs[leg] = (peer, is_caller, seat, now)
+        self.legs[leg] = (peer, is_caller, seat, now, caller)
         for k in [k for k, v in self.legs.items() if now - v[3] > 3600]:
             del self.legs[k]
         if is_caller and seat:
             # The caller leg itself names its agent; no peer needed.
             del self.legs[leg]
-            return (leg, seat)
+            return (leg, seat, caller)
         if not peer or peer not in self.legs:
             return None
-        _, peer_caller, peer_seat, _ = self.legs[peer]
+        _, peer_caller, peer_seat, _, peer_caller_no = self.legs[peer]
         resolved = None
         if is_caller and peer_seat:
-            resolved = (leg, peer_seat)
+            resolved = (leg, peer_seat, caller)
         elif seat and peer_caller:
-            resolved = (peer, seat)
+            resolved = (peer, seat, peer_caller_no)
+        elif is_caller:
+            resolved = (leg, None, caller)
+        elif peer_caller:
+            resolved = (peer, None, peer_caller_no)
         if resolved:
             del self.legs[leg]
             self.legs.pop(peer, None)
         return resolved
+
+
+def event_ts(headers: dict) -> int:
+    """Bridge time from an event's Event-Date-Timestamp (microseconds
+    since epoch); falls back to now when absent or malformed."""
+    raw = (headers.get("Event-Date-Timestamp", "") or "").strip()
+    if raw.isdigit():
+        return int(raw) // 1_000_000
+    return int(time.time())
 
 
 class BridgeEventListener:
@@ -1131,7 +1171,7 @@ class BridgeEventListener:
 
     def __init__(self, db_path: str, host: Optional[str] = None,
                  port: Optional[int] = None, password: Optional[str] = None,
-                 seats=DESK_SEATS):
+                 seats=DESK_SEATS, live_queue=None):
         self.db_path = db_path
         self.host = host or os.environ.get("ESL_HOST", "127.0.0.1")
         try:
@@ -1139,6 +1179,9 @@ class BridgeEventListener:
         except ValueError:
             self.port = 8021
         self.password = password
+        # Resolved bridges land here for the Bridge to materialize as
+        # answer-time records on the next feed/list poll (thread-safe).
+        self.live_queue = live_queue
         self.pairing = BridgeEventPairing(seats)
         self.connected = False
         self.mapped = 0
@@ -1236,8 +1279,15 @@ class BridgeEventListener:
                     continue
                 resolved = self.pairing.note(headers)
                 if resolved:
-                    self._persist(resolved[0], resolved[1])
-                    self.mapped += 1
+                    call_id, seat, caller = resolved
+                    if seat:
+                        self._persist(call_id, seat)
+                        self.mapped += 1
+                    if self.live_queue is not None:
+                        self.live_queue.put({
+                            "call_id": call_id, "seat": seat or "",
+                            "caller": caller,
+                            "started_at": event_ts(headers)})
         finally:
             self.connected = False
             try:
@@ -1260,9 +1310,32 @@ class Bridge:
 
     def __post_init__(self):
         self._event_listener = None
+        # Bridges resolved by the ESL listener wait here until the next
+        # feed/list poll materializes them (thread-safe queue).
+        self.live_calls: queue.Queue = queue.Queue()
         if self.enable_event_listener:
-            self._event_listener = BridgeEventListener(self.store.db_path)
+            self._event_listener = BridgeEventListener(
+                self.store.db_path, live_queue=self.live_calls)
             self._event_listener.start()
+
+    def drain_live_calls(self) -> None:
+        """Materialize calls the ESL listener saw bridged as answer-time
+        records, so the owning seat's desk pops during the call instead
+        of at hangup. Idempotent (save_call upserts by CallID); the
+        hangup CDR later fills duration/recording and any caller the
+        event did not carry. Cheap when empty: called on every feed and
+        list poll."""
+        while True:
+            try:
+                item = self.live_calls.get_nowait()
+            except queue.Empty:
+                return
+            rec = CallRecord(
+                call_id=item["call_id"], caller=item.get("caller", ""),
+                direction="in", answered=True, duration_sec=0, wait_sec=0,
+                start_epoch=int(item.get("started_at") or time.time()),
+                agent=item.get("seat", ""), ticket_flag=True)
+            self.store.save_call(rec, True, kind="电话")
 
     def event_listener_status(self) -> Optional[str]:
         """None when disabled, else the listener's ESL state

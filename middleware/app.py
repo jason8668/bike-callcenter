@@ -814,7 +814,7 @@ border-radius:999px;padding:6px 14px;font-size:14px}
 .seat-note{color:var(--muted);font-size:13px;margin-top:10px;line-height:1.6}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
 .dot-green{background:#34c759}.dot-amber{background:#ff9500}.dot-gray{background:#8a8a8e}
-.topbar .seats{gap:6px}
+.topbar .seats{flex-direction:column;gap:4px;align-items:flex-start}
 .topbar .seat-chip{padding:3px 10px;font-size:12px}
 .topbar .dot{width:7px;height:7px;margin-right:5px}
 .stats{display:flex;gap:28px;margin-bottom:8px}
@@ -877,14 +877,20 @@ font-size:14px;cursor:pointer;flex-shrink:0;box-shadow:0 4px 12px rgba(0,122,255
 .audio-fill{height:100%;width:0;background:#007aff;border-radius:3px}
 .audio-time{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 .user-box{background:linear-gradient(135deg,rgba(52,199,123,.12),rgba(255,204,0,.12));
-border-radius:16px;padding:14px 16px;margin:14px 0}
+border-radius:16px;padding:10px 12px;margin:10px 0}
+.user-box .tag-chip{padding:4px 8px;font-size:12px}
+.user-box .tag-sug{padding:4px 10px;font-size:12px}
+.meta-strip{display:flex;gap:24px;align-items:center;background:rgba(120,120,128,.08);
+border-radius:12px;padding:8px 14px;margin:12px 0;font-size:13px}
+.meta-strip span{color:var(--muted)}
+.meta-strip b{color:#000;font-size:14px;font-weight:600}
 .tag-chip{display:inline-flex;align-items:center;gap:4px;background:#007aff;color:#fff;
 border-radius:999px;padding:5px 10px;font-size:13px;margin:0 6px 6px 0}
 .tag-chip button{border:0;background:transparent;color:#fff;font-size:14px;cursor:pointer;line-height:1;padding:0 2px}
 .tag-sug{border:1px solid rgba(0,122,255,.4);background:rgba(0,122,255,.08);color:#007aff;
 border-radius:999px;padding:5px 12px;font-size:13px;margin:0 6px 6px 0;cursor:pointer;font-family:inherit}
 #tagChips{margin-top:2px}
-#tagSuggest{margin-top:10px}
+#tagSuggest{margin-top:6px}
 .export-modal{position:fixed;inset:0;background:rgba(20,30,50,.45);backdrop-filter:blur(6px);z-index:200;display:flex;align-items:flex-start;justify-content:center;padding:6vh 16px;overflow:auto}
 .export-panel{width:min(860px,100%);max-height:88vh;overflow:auto}
 .export-table{width:100%;border-collapse:collapse;font-size:13px}
@@ -1382,18 +1388,17 @@ async function openRecord(id) {
       ? "<button class='btn btn-ghost' id='notesBtn' style='margin-top:12px' onclick='editNotes()'>修改</button> "
       : "<button class='btn' id='notesBtn' style='margin-top:12px' onclick='saveNotes()'>保存</button> ") +
     "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span></div>" +
+    '<div class="meta-strip"><span>客服人员 <b>' + esc(d.agent || d.owner_seat || "—") + "</b></span>" +
+    '<span>通话时长 <b>' + esc(d.duration) + "</b></span></div>" +
     '<div class="user-box">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
     '<span style="font-weight:600">用户标签</span></div>' +
     '<div id="tagChips"></div>' +
-    '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}">' +
+    '<div style="display:flex;gap:8px;margin-top:6px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}\">' +
     '<button class="btn btn-sm" id="addTagBtn" onclick="addTag()">添加</button></div>' +
     '<div id="tagSuggest"></div></div>' +
-    '<div class="meta-grid">' +
-    '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
-    '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div>" +
-    '<div class="meta-item meta-wide"><span>通话ID</span><b class="mono">' + esc(d.display_id || d.call_id) + "</b></div>" +
-    '<div class="meta-item meta-wide"><span>录音</span>' + audio + "</div></div>";
+    '<div class="meta-item" style="margin-top:10px"><div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--muted);font-size:12px">录音</span><span class="mono" style="color:var(--muted);font-size:12px">通话ID ' + esc(d.display_id || d.call_id) + '</span></div>' +
+    '<div style="margin-top:6px">' + audio + '</div></div>';
   // can_edit is explicit-false only when the backend says another seat
   // owns this record; an absent flag (old backend) stays editable.
   currentCanEdit = (d.can_edit !== false);
@@ -1746,6 +1751,7 @@ def desk_get(request: Request):
 @app.get("/desk/feed")
 def desk_feed(request: Request):
     require_seat(request)
+    bridge.drain_live_calls()
     return {"records": bridge.store.recent_records(20)}
 
 
@@ -1821,6 +1827,7 @@ async def desk_busy(request: Request):
 def desk_records(request: Request, caller: str = "", kind: str = "",
                  date: str = "", offset: int = 0, limit: int = 50):
     require_seat(request)
+    bridge.drain_live_calls()
     return {"records": bridge.store.list_records(
         caller=caller, kind=kind, date_from=date, date_to=date,
         offset=offset, limit=limit)}
