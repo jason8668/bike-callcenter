@@ -75,6 +75,30 @@ class TestBridge(unittest.TestCase):
         self.assertTrue(rec["has_recording"])
         self.assertEqual(len(self.bridge.store.list_records()), 1)
 
+    def test_caller_history_excludes_self_and_stats_legs(self):
+        self.bridge.handle_cdr(dict(CDR))  # 13800000000, answered
+        self.bridge.handle_cdr(dict(CDR, uuid="b2", billsec="0",
+                                    duration="5"))  # same caller, missed
+        out3 = self.bridge.handle_cdr(dict(
+            CDR, uuid="c3", caller_id_number="13900000000"))
+        self.bridge.store.save_call(
+            CallRecord(call_id="stat-2", caller="13800000000",
+                       callee="", direction="in"), False)
+        out_cur = self.bridge.handle_cdr(dict(CDR, uuid="cur1"))
+        self.bridge.store.set_record_card(out3["record_id"], "K100")
+        self.bridge.store.set_record_card(out_cur["record_id"], "K100")
+        hist = self.bridge.caller_history(out_cur["record_id"])
+        self.assertEqual(hist["total"], 3)
+        self.assertEqual([r["kind"] for r in hist["rows"]],
+                         ["电话", "未接", "电话"])  # newest first
+        self.assertTrue(all(r["record_id"] != out_cur["record_id"]
+                            for r in hist["rows"]))
+        self.assertTrue(hist["rows"][0]["via_card"])  # 139 number, same card
+        self.assertFalse(hist["rows"][1]["via_card"])
+        self.assertTrue(all(r["recording_file"] for r in hist["rows"]))
+        self.assertEqual(self.bridge.caller_history(999999),
+                         {"total": 0, "rows": []})
+
     def test_duplicate_cdr_is_idempotent(self):
         first = self.bridge.handle_cdr(CDR)
         second = self.bridge.handle_cdr(CDR)

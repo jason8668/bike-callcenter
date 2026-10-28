@@ -728,7 +728,7 @@ font-size:15px;width:100%;background:rgba(255,255,255,.85)}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--blue);
 box-shadow:0 0 0 4px rgba(0,122,255,.15)}
 label{font-size:14px;color:var(--muted);display:block;margin:12px 0 4px}
-.wrap{max-width:1400px;margin:0 auto;padding:20px}
+.wrap{max-width:1520px;margin:0 auto;padding:20px}
 .card{background:rgba(255,255,255,.72);border-radius:24px;
 box-shadow:0 8px 32px rgba(0,0,0,.08);border:1px solid rgba(255,255,255,.65);
 backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%);
@@ -750,7 +750,7 @@ padding:20px 22px}
 """
 
 DESK_CSS = """
-.grid{grid-template-columns:1.05fr 1.3fr 0.85fr}
+.grid{grid-template-columns:0.85fr 2.1fr 1.25fr}
 .alert{display:none;border-radius:24px;padding:16px 22px;margin-bottom:20px;
 background:rgba(255,59,48,.88);color:#fff;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
 box-shadow:0 8px 28px rgba(255,59,48,.35)}
@@ -806,17 +806,19 @@ audio{width:100%;margin-top:8px}
 .empty{color:var(--muted);text-align:center;padding:30px 0}
 .hero-empty{width:230px;max-width:80%;border-radius:16px;display:block;margin:0 auto 14px}
 .detail-sticky{position:sticky;top:68px}
+.detail-col{padding:16px 20px}
 .right-col{display:flex;flex-direction:column;gap:20px}
+.hist-head{color:var(--muted);font-size:13px;margin-bottom:6px}
 @media(max-width:1100px){.grid{grid-template-columns:1fr}.detail-col{order:-1}.detail-sticky{position:static}}
 .detail-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
-.detail-caller{font-size:24px;font-weight:700;letter-spacing:-.3px}
+.detail-caller{font-size:26px;font-weight:700;letter-spacing:-.3px}
 .detail-time{color:var(--muted);font-size:13px}
 .notes-box{background:linear-gradient(135deg,rgba(0,122,255,.12),rgba(88,86,214,.12));
-border-radius:16px;padding:14px 16px;margin:14px 0}
+border-radius:16px;padding:12px 14px;margin:10px 0}
 .notes-box label{margin-top:8px}
 .notes-box label:first-child{margin-top:0}
-.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
-.meta-item{background:rgba(120,120,128,.08);border-radius:12px;padding:10px 12px}
+.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}
+.meta-item{background:rgba(120,120,128,.08);border-radius:12px;padding:8px 12px}
 .meta-item span{display:block;color:var(--muted);font-size:12px;margin-bottom:2px}
 .meta-item b{font-size:14px;font-weight:600}
 .meta-item .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
@@ -991,6 +993,11 @@ def desk_page_html(seat: str) -> str:
       <div class="empty"><img class="hero-empty" src="__HERO__">在左侧点一条记录查看详情、听录音、补填内容。<br>来电时新记录会自动弹到这里。</div>
     </div>
     <div class="right-col">
+      <div class="card">
+        <h2>该客户历史</h2>
+        <div id="callerHistory"><span style="color:var(--muted)">打开一条记录后显示该客户的历史。</span></div>
+        <audio id="histAudio" controls style="width:100%;display:none;margin-top:8px"></audio>
+      </div>
       <div class="card">
         <h2>坐席状态</h2>
         <div id="seatStrip" class="seats"><span style="color:var(--muted)">加载中…</span></div>
@@ -1357,7 +1364,36 @@ async function openRecord(id) {
   var attached = {};
   (d.tags || []).forEach(function(t) { attached[t] = true; });
   renderTagSuggest(d.frequent_tags || [], currentDefaults, attached);
+  renderCallerHistory(d.history);
   try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
+}
+function renderCallerHistory(h) {
+  var box = $("callerHistory");
+  if (!box) return;
+  if (!h || !h.rows || !h.rows.length) {
+    box.innerHTML = '<span style="color:var(--muted)">该客户暂无历史记录。</span>';
+    return;
+  }
+  var html = '<div class="hist-head">共 ' + h.total + ' 条，显示最新 ' + h.rows.length + ' 条</div>';
+  html += h.rows.map(function(r) {
+    var note = (r.service_type ? esc(r.service_type) : "") +
+      (r.question ? " · " + esc(r.question) : "");
+    var play = r.has_recording
+      ? '<button type="button" class="btn btn-sm btn-ghost" onclick="event.stopPropagation();playHistoryRecording(' + r.record_id + ')">▶</button>'
+      : "";
+    return '<div class="row" onclick="openRecord(' + r.record_id + ')">' +
+      '<div class="row-top"><span>' + esc(r.time) + "</span>" + kindPill(r.kind) +
+      "<span>" + esc(r.duration) + "</span>" + play + "</div>" +
+      (r.via_card ? '<div class="caller">' + esc(r.caller) + "（同卡）</div>" : "") +
+      '<div class="q">' + (note || "未填写") + "</div></div>";
+  }).join("");
+  box.innerHTML = html;
+}
+function playHistoryRecording(id) {
+  var audio = $("histAudio");
+  audio.src = "/desk/records/" + id + "/recording";
+  audio.style.display = "block";
+  audio.play();
 }
 var currentDefaults = [];
 function renderTagChips(tags) {
@@ -1421,6 +1457,7 @@ async function saveCard() {
     var hint = $("histHint");
     if (hint) { hint.textContent = d.history_hint; hint.style.display = "block"; }
   }
+  if (d.history) renderCallerHistory(d.history);
 }
 function editNotes() {
   $("fService").disabled = false;
@@ -1695,6 +1732,17 @@ def desk_records(request: Request, caller: str = "", kind: str = "",
         offset=offset, limit=limit)}
 
 
+def _history_response(rowid: int) -> dict:
+    """History rail payload: rows carry has_recording resolved against
+    the recordings volume (a filename alone is not proof of a playable
+    file), and the stored path itself is stripped from the response."""
+    hist = bridge.caller_history(rowid)
+    for row in hist["rows"]:
+        row["has_recording"] = find_recording_file(
+            row.pop("recording_file", "") or "") is not None
+    return hist
+
+
 @app.get("/desk/records/{record_id}")
 def desk_record(request: Request, record_id: int):
     require_seat(request)
@@ -1703,6 +1751,7 @@ def desk_record(request: Request, record_id: int):
         raise HTTPException(status_code=404, detail="record not found")
     rec["display_id"] = display_call_id(rec)
     rec["history_hint"] = bridge.record_history_hint(record_id)
+    rec["history"] = _history_response(record_id)
     rec["default_tags"] = DEFAULT_TAGS
     return rec
 
@@ -1719,7 +1768,8 @@ async def desk_record_card(request: Request, record_id: int):
         raise HTTPException(status_code=404, detail="record not found")
     rec = bridge.store.get_record(record_id)
     return {"ok": True, "card": rec["card"] if rec else card,
-            "history_hint": bridge.record_history_hint(record_id)}
+            "history_hint": bridge.record_history_hint(record_id),
+            "history": _history_response(record_id)}
 
 
 @app.post("/desk/records/{record_id}/tags")

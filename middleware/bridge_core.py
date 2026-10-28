@@ -664,6 +664,39 @@ class CallStore:
                  "via_card": bool(phone and r[0] != phone)}
                 for r in rows]
 
+    def caller_history_rows(self, phone: str, card: str = "",
+                            exclude_call_id: str = "",
+                            limit: int = 10) -> tuple:
+        """(total, rows) for the desk history rail: past records for a
+        number OR its card, newest first, excluding one call. Same
+        scope as calls_for_user; rows carry record_id so the rail can
+        open them, plus recording_file for playback."""
+        if not phone and not card:
+            return 0, []
+        if card:
+            where = ("is_record=1 AND call_id != ? AND"
+                     " (caller=? OR card_no=? OR caller IN"
+                     " (SELECT phone FROM caller_cards WHERE card=?))")
+            args: tuple = (exclude_call_id, phone, card, card)
+        else:
+            where = "is_record=1 AND call_id != ? AND caller=?"
+            args = (exclude_call_id, phone)
+        with self._conn() as c:
+            total = c.execute("SELECT COUNT(*) FROM calls WHERE " + where,
+                              args).fetchone()[0]
+            rows = c.execute(
+                "SELECT rowid, caller, start_epoch, kind, duration_sec,"
+                " service_type, question, recording_path FROM calls"
+                " WHERE " + where + " ORDER BY rowid DESC LIMIT ?",
+                (*args, limit)).fetchall()
+        return total, [{
+            "record_id": r[0], "caller": r[1], "time": fmt_cst(r[2] or 0),
+            "kind": r[3] or "电话", "duration": fmt_duration(r[4] or 0),
+            "service_type": r[5] or "", "question": r[6] or "",
+            "recording_file": r[7] or "",
+            "via_card": bool(phone and r[1] != phone),
+        } for r in rows]
+
     def list_records(self, caller: str = "", agent: str = "", kind: str = "",
                      date_from: str = "", date_to: str = "",
                      limit: int = 50, offset: int = 0) -> list[dict]:
@@ -1056,6 +1089,16 @@ class Bridge:
             return summarize_call_history(past)
         except Exception:
             return ""
+
+    def caller_history(self, rowid: int, limit: int = 10) -> dict:
+        """History rail payload for a record: its number-or-card past
+        records, newest first, excluding itself."""
+        rec = self.store.get_record(rowid)
+        if not rec:
+            return {"total": 0, "rows": []}
+        total, rows = self.store.caller_history_rows(
+            rec["caller"], rec["card"], rec["call_id"], limit)
+        return {"total": total, "rows": rows}
 
     def handle_event(self, event: str, payload: dict) -> dict:
         rec = parse_cdr(payload)
