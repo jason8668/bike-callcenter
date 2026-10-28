@@ -32,6 +32,24 @@ class TestParse(unittest.TestCase):
         self.assertEqual(rec.call_id, "x1")
         self.assertFalse(rec.answered)
 
+    def test_parse_caller_effective_id_fallback(self):
+        # Loopback/queue legs may leave caller_id_number empty while the
+        # effective (or originate) caller ID carries the number.
+        rec = parse_cdr({"variables": {
+            "uuid": "x2", "billsec": "30",
+            "effective_caller_id_number": "13800000000"}})
+        self.assertEqual(rec.caller, "13800000000")
+        rec = parse_cdr({"variables": {
+            "uuid": "x3", "billsec": "30",
+            "origination_caller_id_number": "13900000000"}})
+        self.assertEqual(rec.caller, "13900000000")
+        # A present caller_id_number still wins over the fallbacks.
+        rec = parse_cdr({"variables": {
+            "uuid": "x4", "billsec": "30",
+            "caller_id_number": "13700000000",
+            "effective_caller_id_number": "13800000000"}})
+        self.assertEqual(rec.caller, "13700000000")
+
 
 def make_bridge(tmp, roster=None):
     return Bridge(store=CallStore(os.path.join(tmp, "b.db")),

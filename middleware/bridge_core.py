@@ -187,7 +187,13 @@ def parse_cdr(payload: dict) -> CallRecord:
     direction = "out" if direction_raw.startswith("out") else "in"
     return CallRecord(
         call_id=str(g("uuid", "call_id", "xml_cdr_uuid", "uniqueid")),
-        caller=str(g("caller_id_number", "from", "caller", "sip_from_user")),
+        # Loopback/queue legs often carry the number only as the
+        # effective caller ID (or the originate param) while the plain
+        # caller_id_number is empty; those are fallbacks only, never
+        # overriding a present caller_id_number.
+        caller=str(g("caller_id_number", "from", "caller", "sip_from_user",
+                     "effective_caller_id_number",
+                     "origination_caller_id_number")),
         callee=str(g("destination_number", "to", "callee", "sip_to_user")),
         direction=direction,
         answered=billsec > 0 or str(g("answered", "bridge_hangup")).lower() == "true",
