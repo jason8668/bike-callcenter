@@ -1361,6 +1361,13 @@ async function openRecord(id) {
       ? "<button class='btn btn-ghost' id='notesBtn' style='margin-top:12px' onclick='editNotes()'>修改</button> "
       : "<button class='btn' id='notesBtn' style='margin-top:12px' onclick='saveNotes()'>保存</button> ") +
     "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span></div>" +
+    '<div class="user-box">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+    '<span style="font-weight:600">用户标签</span></div>' +
+    '<div id="tagChips"></div>' +
+    '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}">' +
+    '<button class="btn btn-sm" onclick="addTag()">添加</button></div>' +
+    '<div id="tagSuggest"></div></div>' +
     '<div class="meta-grid">' +
     '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
     '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div>" +
@@ -1375,15 +1382,6 @@ async function openRecord(id) {
   renderCallerHistory(d.history);
   try { history.replaceState(null, "", "/desk?record=" + id); } catch (e) {}
 }
-function portraitUserBox() {
-  return '<div class="user-box">' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
-    '<span style="font-weight:600">用户标签</span></div>' +
-    '<div id="tagChips"></div>' +
-    '<div style="display:flex;gap:8px;margin-top:8px"><input id="fTag" placeholder="输入新标签，回车添加" onkeydown="if(event.key===\\'Enter\\'){addTag();}">' +
-    '<button class="btn btn-sm" onclick="addTag()">添加</button></div>' +
-    '<div id="tagSuggest"></div></div>';
-}
 function daysAgoText(dateStr) {
   var s = (dateStr || "").slice(0, 10);
   var d = new Date(s + "T00:00:00");
@@ -1394,36 +1392,39 @@ function daysAgoText(dateStr) {
   if (diff === 1) return "昨天";
   return diff + " 天前";
 }
-function portraitLine(label, value) {
-  return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:13px;padding:3px 0">' +
-    '<span style="color:var(--muted);flex:none">' + esc(label) + '</span>' +
-    '<b style="text-align:right">' + value + '</b></div>';
-}
 function renderPortrait(h) {
+  // Portrait fields reuse the meta-grid/meta-item cards, so the
+  // portrait reads as part of the desk instead of a dense table:
+  // small muted label on top, value below, same soft gray pill.
   var box = $("customerPortrait");
   if (!box) return;
   var p = (h && h.portrait) || null;
   if (!p || !p.total) {
-    box.innerHTML = '<div style="color:var(--muted);font-size:13px;margin-bottom:8px">该客户暂无历史记录。</div>' + portraitUserBox();
+    box.innerHTML = '<div style="color:var(--muted);font-size:13px">该客户暂无历史记录。</div>';
     return;
   }
   var bk = p.by_kind || {};
-  var html = portraitLine("累计来电", p.total + " 次（电话 " + (bk["电话"] || 0) + " · 未接 " + (bk["未接"] || 0) + " · 留言 " + (bk["留言"] || 0) + "）");
-  if (p.first_time) html += portraitLine("首次联系", esc(p.first_time.slice(0, 10)));
+  var html = '<div class="meta-grid" style="margin-top:0">';
+  html += '<div class="meta-item"><span>累计来电</span><b>' + p.total + ' 次（电话 ' + (bk["电话"] || 0) + ' · 未接 ' + (bk["未接"] || 0) + ' · 留言 ' + (bk["留言"] || 0) + '）</b></div>';
+  if (p.first_time) html += '<div class="meta-item"><span>首次联系</span><b>' + esc(p.first_time.slice(0, 10)) + '</b></div>';
   if (p.last) {
     var ago = daysAgoText(p.last.time);
-    html += portraitLine("最近联系", esc(p.last.kind) + "（" + esc(p.last.time.slice(0, 10)) + (ago ? "，" + ago : "") + "）");
+    html += '<div class="meta-item"><span>最近联系</span><b>' + esc(p.last.kind) + '（' + esc(p.last.time.slice(0, 10)) + (ago ? '，' + ago : '') + '）</b></div>';
   }
   if (p.top_types && p.top_types.length) {
-    html += portraitLine("常见问题", esc(p.top_types.map(function(t) { return t.type + "×" + t.count; }).join("、")));
+    html += '<div class="meta-item"><span>常见问题</span><b>' + esc(p.top_types.map(function(t) { return t.type + "×" + t.count; }).join("、")) + '</b></div>';
   }
   if (p.last && (p.last.service_type || p.last.question)) {
     var lastNote = esc(p.last.service_type || "");
     if (p.last.question) lastNote += (lastNote ? " · " : "") + esc(p.last.question);
-    html += portraitLine("上次反映", lastNote);
+    html += '<div class="meta-item meta-wide"><span>上次反映</span><b>' + lastNote + '</b></div>';
   }
-  if (p.via_card) html += portraitLine("同卡他号来电", p.via_card + " 次");
-  box.innerHTML = html + '<div style="height:8px"></div>' + portraitUserBox();
+  if (p.top_tags && p.top_tags.length) {
+    html += '<div class="meta-item meta-wide"><span>常用标签</span><b>' + p.top_tags.map(function(t) { return '<span class="tag-chip">' + esc(t) + '</span>'; }).join(" ") + '</b></div>';
+  }
+  if (p.via_card) html += '<div class="meta-item"><span>同卡他号来电</span><b>' + p.via_card + ' 次</b></div>';
+  html += '</div>';
+  box.innerHTML = html;
 }
 function renderCallerHistory(h) {
   var box = $("callerHistory");

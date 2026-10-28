@@ -706,7 +706,7 @@ class CallStore:
         limited to the latest 10 rail rows."""
         empty = {"total": 0, "by_kind": {"电话": 0, "未接": 0, "留言": 0},
                  "first_time": "", "last": None, "top_types": [],
-                 "via_card": 0}
+                 "top_tags": [], "via_card": 0}
         if not phone and not card:
             return empty
         if card:
@@ -742,6 +742,11 @@ class CallStore:
                 "SELECT COUNT(*) FROM calls WHERE " + where +
                 " AND caller != ?", (*args, phone)).fetchone()[0] if card \
                 else 0
+            top_tags = c.execute(
+                "SELECT tag, COUNT(*) FROM record_tags JOIN calls"
+                " ON record_tags.record_id = calls.rowid WHERE " + where +
+                " GROUP BY tag ORDER BY COUNT(*) DESC, tag ASC LIMIT 2",
+                args).fetchall()
         return {"total": total, "by_kind": by_kind,
                 "first_time": fmt_cst(first or 0),
                 "last": ({"kind": last[0] or "电话",
@@ -749,6 +754,7 @@ class CallStore:
                           "service_type": last[2] or "",
                           "question": last[3] or ""} if last else None),
                 "top_types": [{"type": t, "count": n} for t, n in top],
+                "top_tags": [t for t, _ in top_tags],
                 "via_card": via}
 
     def list_records(self, caller: str = "", agent: str = "", kind: str = "",

@@ -103,8 +103,8 @@ class TestBridge(unittest.TestCase):
 
     def test_caller_portrait_aggregates_full_history(self):
         out1 = self.bridge.handle_cdr(dict(CDR))  # 138, answered
-        self.bridge.handle_cdr(dict(CDR, uuid="b2", billsec="0",
-                                    duration="5"))  # same caller, missed
+        out2 = self.bridge.handle_cdr(dict(CDR, uuid="b2", billsec="0",
+                                           duration="5"))  # same caller, missed
         out3 = self.bridge.handle_cdr(dict(
             CDR, uuid="c3", caller_id_number="13900000000"))
         out_cur = self.bridge.handle_cdr(dict(CDR, uuid="cur1"))
@@ -113,6 +113,11 @@ class TestBridge(unittest.TestCase):
         self.bridge.store.set_notes(out_cur["record_id"], "当前通话", "锁桩故障")
         self.bridge.store.set_record_card(out3["record_id"], "K100")
         self.bridge.store.set_record_card(out_cur["record_id"], "K100")
+        self.bridge.store.add_record_tag(out1["record_id"], "重点关注")
+        self.bridge.store.add_record_tag(out1["record_id"], "老年用户")
+        self.bridge.store.add_record_tag(out3["record_id"], "重点关注")
+        self.bridge.store.add_record_tag(out3["record_id"], "高频用户")
+        self.bridge.store.add_record_tag(out2["record_id"], "高频用户")
         p = self.bridge.store.caller_portrait("13800000000", "K100", "cur1")
         self.assertEqual(p["total"], 3)
         self.assertEqual(p["by_kind"], {"电话": 2, "未接": 1, "留言": 0})
@@ -123,13 +128,16 @@ class TestBridge(unittest.TestCase):
         self.assertEqual(p["last"]["service_type"], "还车异常")
         self.assertEqual(p["via_card"], 1)
         self.assertTrue(p["first_time"])
+        # Top 2 tags by frequency across the customer's past records;
+        # the count-1 tag drops out, ties break by tag name.
+        self.assertEqual(p["top_tags"], ["重点关注", "高频用户"])
         hist = self.bridge.caller_history(out_cur["record_id"])
         self.assertEqual(hist["portrait"]["total"], 3)
         self.assertEqual(self.bridge.store.caller_portrait("", ""),
                          {"total": 0,
                           "by_kind": {"电话": 0, "未接": 0, "留言": 0},
                           "first_time": "", "last": None, "top_types": [],
-                          "via_card": 0})
+                          "top_tags": [], "via_card": 0})
 
     def test_duplicate_cdr_is_idempotent(self):
         first = self.bridge.handle_cdr(CDR)
