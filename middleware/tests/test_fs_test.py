@@ -97,10 +97,14 @@ class TestAgentManagement(unittest.TestCase):
         esl = FakeEsl({"agent list": "+OK\n8001\n8002\n"})
         steps = fs_test.ensure_test_agent(esl)
         cmds = [s["command"] for s in steps]
-        self.assertTrue(any("agent add" in c and "testagent" in c
-                            and "loopback/8999" in c for c in cmds))
-        self.assertTrue(any("tier add" in c for c in cmds))
-        self.assertTrue(any("set status testagent Available" in c for c in cmds))
+        # mod_callcenter takes name + type on add; the contact is a
+        # separate step (the old queue-first form failed with -ERR).
+        self.assertEqual(cmds[1:], [
+            "callcenter_config agent add testagent callback",
+            "callcenter_config agent set contact testagent loopback/8999",
+            "callcenter_config tier add 客服队列 testagent 1 1",
+            "callcenter_config agent set status testagent Available",
+        ])
 
     def test_ensure_skips_existing_agent(self):
         esl = FakeEsl({"agent list": "+OK\ntestagent\n"})

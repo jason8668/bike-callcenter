@@ -539,6 +539,7 @@ class CallStore:
             "direction": r[4], "answered": bool(r[5]),
             "duration": fmt_duration(r[6] or 0), "duration_sec": r[6] or 0,
             "wait_sec": r[7] or 0, "time": fmt_cst(r[8] or 0),
+            "start_epoch": r[8] or 0,
             "agent": r[9] or "", "kind": r[10] or "电话",
             "has_recording": bool(r[11]), "recording_file": r[11] or "",
             "question": r[12] or "", "service_type": r[13] or "",

@@ -287,6 +287,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
   let callHungUp = false;
   let callLive = false;
   let lastCaller = "";
+  let dialEpoch = 0;
   function stopPoll() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
@@ -304,7 +305,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
   async function refreshResult(final) {
     if (!lastCaller) return;
     try {
-      const resp = await fetch("/fs-test/result?caller=" + encodeURIComponent(lastCaller), {
+      const resp = await fetch("/fs-test/result?caller=" + encodeURIComponent(lastCaller) + "&since=" + dialEpoch, {
         headers: {"X-Bridge-Secret": getSecret()}
       });
       const data = await resp.json();
@@ -313,7 +314,9 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
         if (final) showBox("fs_result", false, "没有找到该号码的记录（接通弹屏未触发，且话单也未生成记录）。");
         return;
       }
-      let html = "结果记录：<b>" + esc(rec.caller) + "</b>　" + esc(rec.kind) +
+      const stale = data.is_fresh === false;
+      let html = (stale ? "本次测试尚未生成新记录，下面是该号码最近的一条旧记录（时间早于本次拨打），仅供参考，不要当作本次结果：<br>" : "") +
+        "结果记录：<b>" + esc(rec.caller) + "</b>　" + esc(rec.kind) +
         "　客服：" + esc(rec.agent || "—") + "　时长：" + esc(rec.duration) +
         "　时间：" + esc(rec.time) + "　通话ID：" + esc(rec.display_id || rec.call_id);
       html += "<br><a href=\\"/desk?record=" + rec.record_id + "\\" target=\\"_blank\\">在工作台打开这条记录</a>";
@@ -322,7 +325,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
       } else {
         html += "<br>录音：暂无文件（未接通的排队呼叫没有录音文件是正常的）。";
       }
-      if (final && !popSeen && rec.kind === "电话") {
+      if (final && !stale && !popSeen && rec.kind === "电话") {
         html += "<br>接通弹屏：未触发——记录是挂机后由话单生成的，接通时没有弹出（execute_on_answer 在队列语境下可能未触发）。";
       }
       showBox("fs_result", true, html);
@@ -340,7 +343,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
           audio.play();
         });
       }
-      if (!final && callLive && rec.kind === "电话" && rec.agent) {
+      if (!final && !stale && callLive && rec.kind === "电话" && rec.agent) {
         popSeen = true;
         setStatus("通话中（接通弹屏：已触发，记录已在接通时弹出）。", true);
       }
@@ -375,6 +378,7 @@ TEST_PAGE_HTML = """<!DOCTYPE html>
     const caller = document.getElementById("fs_caller").value.trim();
     if (!caller) { setStatus("请先填客户手机号码。", false); return; }
     lastCaller = caller;
+    dialEpoch = Math.floor(Date.now() / 1000);
     popSeen = false;
     callHungUp = false;
     callLive = false;
@@ -649,18 +653,24 @@ def fs_test_status(uuid: str = "",
 
 
 @app.get("/fs-test/result")
-def fs_test_result(caller: str = "",
+def fs_test_result(caller: str = "", since: int = 0,
                    x_bridge_secret: str | None = Header(default=None)):
     check_secret(x_bridge_secret)
     rows = bridge.store.list_records(caller=caller, limit=1)
     if not rows:
-        return {"record": None}
+        return {"record": None, "is_fresh": False}
     rec = rows[0]
     full = bridge.store.get_record(rec["record_id"]) or {}
     rec["display_id"] = display_call_id(full) if full else rec["call_id"]
     rec["has_recording"] = find_recording_file(
         full.get("recording_file") or "") is not None
-    return {"record": rec}
+    # Freshness: the page passes its dial-time epoch as `since`. A
+    # record that predates the test must never be presented as the
+    # test's result (a stale simulate record once did exactly that).
+    # 30s tolerance covers browser/server clock skew.
+    start = full.get("start_epoch") or 0
+    is_fresh = (not since) or (start > 0 and start >= since - 30)
+    return {"record": rec, "is_fresh": is_fresh}
 
 
 @app.get("/fs-test/recording/{record_id}")

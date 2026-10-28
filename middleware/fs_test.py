@@ -138,6 +138,10 @@ def parse_exists_reply(reply: Optional[str]) -> bool:
 def ensure_test_agent(esl: Callable[[str], Optional[str]]) -> list:
     """Add the loopback test agent to the queue if not already there.
 
+    mod_callcenter's argument order is `agent add [name] [type]`
+    (contact is a separate `agent set contact` step) -- passing the
+    queue name and contact as the add arguments silently fails with
+    -ERR, which is why the test agent never existed before.
     Returns [{"command", "reply"}] for every step, with None replies
     rendered as "ESL 无响应" by callers. Never raises: a failed step is
     reported, and the originate below will surface the consequence.
@@ -151,8 +155,9 @@ def ensure_test_agent(esl: Callable[[str], Optional[str]]) -> list:
     if TEST_AGENT_NAME in reply:
         return steps
     for cmd in (
-        "callcenter_config agent add " + TEST_QUEUE + " " +
-        TEST_AGENT_NAME + " " + TEST_AGENT_CONTACT,
+        "callcenter_config agent add " + TEST_AGENT_NAME + " callback",
+        "callcenter_config agent set contact " + TEST_AGENT_NAME +
+        " " + TEST_AGENT_CONTACT,
         "callcenter_config tier add " + TEST_QUEUE + " " +
         TEST_AGENT_NAME + " 1 1",
         "callcenter_config agent set status " + TEST_AGENT_NAME +
