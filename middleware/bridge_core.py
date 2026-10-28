@@ -1233,14 +1233,15 @@ class BridgeEventListener:
             head, buf = buf.split(b"\n\n", 1)
             return head
 
-        def drain(length: int) -> None:
+        def read_body(length: int) -> bytes:
             nonlocal buf
             while len(buf) < length:
                 chunk = sock.recv(4096)
                 if not chunk:
                     raise ConnectionError("esl closed")
                 buf += chunk
-            buf = buf[length:]
+            body, buf = buf[:length], buf[length:]
+            return body
 
         try:
             read_block()  # auth/request banner
@@ -1272,9 +1273,21 @@ class BridgeEventListener:
                     length = int(raw_len)
                 if length:
                     try:
-                        drain(length)
+                        body = read_body(length)
                     except socket.timeout:
                         continue
+                    # Real ESL framing: the first block is only the
+                    # MIME envelope (Content-Type/Content-Length); the
+                    # event headers live in the BODY that follows it.
+                    # Parsing the envelope as the event silently drops
+                    # every event, so parse the body when it is one.
+                    # A message with no Content-Length keeps its
+                    # headers from the first block, as before.
+                    if headers.get("Content-Type") == "text/event-plain":
+                        for line in body.decode(errors="replace").splitlines():
+                            if ":" in line:
+                                k, v = line.split(":", 1)
+                                headers[k.strip()] = v.strip()
                 if headers.get("Event-Name") != "CHANNEL_BRIDGE":
                     continue
                 resolved = self.pairing.note(headers)

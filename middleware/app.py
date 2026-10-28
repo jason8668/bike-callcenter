@@ -816,6 +816,9 @@ border-radius:999px;padding:6px 14px;font-size:14px}
 .dot-green{background:#34c759}.dot-amber{background:#ff9500}.dot-gray{background:#8a8a8e}
 .topbar .seats{flex-direction:column;gap:2px;align-items:flex-start}
 .topbar .seat-chip{padding:2px 8px;font-size:13px}
+.seat-frame{background:rgba(255,255,255,.6);backdrop-filter:blur(20px) saturate(180%);
+-webkit-backdrop-filter:blur(20px) saturate(180%);border:1px solid rgba(0,0,0,.06);
+border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.06);padding:6px 10px}
 .topbar .dot{width:7px;height:7px;margin-right:5px}
 .stats{display:flex;gap:28px;margin-bottom:8px}
 .stat b{font-size:28px;display:block;letter-spacing:-.5px}
@@ -989,10 +992,10 @@ def desk_page_html(seat: str) -> str:
 <div class="topbar">
   <div class="brand"><span class="logo">🚲</span> 自行车客服工作台</div>
   <div class="spacer"></div>
-  <div id="seatStrip" class="seats" title="状态由登录自动决定：登录即空闲，自己置忙变置忙，退出变离线"><span style="color:var(--muted)">加载中…</span></div>
   <span>客服 <b id="seatLabel">__SEAT__</b></span>
   <span id="statusPill" class="pill pill-gray">未知</span>
   <label class="switch-wrap"><span>接单</span><span class="switch"><input type="checkbox" id="busySwitch" checked><span class="slider"></span></span></label>
+  <div class="seat-frame"><div id="seatStrip" class="seats" title="状态由登录自动决定：登录即空闲，自己置忙变置忙，退出变离线"><span style="color:var(--muted)">加载中…</span></div></div>
   <form method="post" action="/logout" style="margin:0">
     <button class="btn btn-sm btn-ghost">退出</button>
   </form>
@@ -1385,10 +1388,12 @@ async function openRecord(id) {
     '<button class="btn btn-sm" id="saveCardBtn" onclick="saveCard()">保存卡号</button></div>' +
     '<div id="cardMsg" style="color:var(--muted);font-size:13px;margin-top:4px"></div></div></div>' +
     "<label>通话内容（客户问的什么问题）</label>" +
-    "<textarea id='fQuestion' rows='3'" + dis + ">" + esc(d.question) + "</textarea>" +
+    '<div style="display:flex;gap:8px;align-items:flex-start">' +
+    "<textarea id='fQuestion' rows='3' style='flex:1;min-width:0'" + dis + ">" + esc(d.question) + "</textarea>" +
     (locked
-      ? "<button class='btn btn-ghost' id='notesBtn' style='margin-top:12px' onclick='editNotes()'>修改</button> "
-      : "<button class='btn' id='notesBtn' style='margin-top:12px' onclick='saveNotes()'>保存</button> ") +
+      ? "<button class='btn btn-ghost' id='notesBtn' onclick='editNotes()'>修改</button> "
+      : "<button class='btn' id='notesBtn' onclick='saveNotes()'>保存</button> ") +
+    "</div>" +
     "<span id='saveMsg' style='color:var(--muted);font-size:14px'></span></div>" +
     '<div class="tag-row">' +
     '<div class="user-box tag-box">' +

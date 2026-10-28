@@ -159,21 +159,27 @@ class TestBridgeEventPairing(unittest.TestCase):
             subscribe_lines.append(buf.split(b"\n")[0].decode())
             conn.sendall(b"Content-Type: command/reply\n"
                          b"Reply-Text: +OK accepted\n\n")
-            caller_block = (
-                b"Content-Type: text/event-plain\n"
+            # Real ESL wire format: MIME envelope (Content-Length +
+            # Content-Type), blank line, then the event headers as
+            # the body. Sending everything in one block once hid a
+            # parser that read the envelope and discarded the body.
+            def event_frame(headers_block: bytes) -> bytes:
+                body = headers_block + b"\n"
+                return (b"Content-Length: " + str(len(body)).encode() +
+                        b"\nContent-Type: text/event-plain\n\n" + body)
+            caller_block = event_frame(
                 b"Event-Name: CHANNEL_BRIDGE\n"
                 b"Unique-ID: uuid-caller\n"
                 b"Bridge-A-Unique-ID: uuid-caller\n"
                 b"Bridge-B-Unique-ID: uuid-agent\n"
-                b"variable_bridge_ticket: 1\n\n")
-            agent_block = (
-                b"Content-Type: text/event-plain\n"
+                b"variable_bridge_ticket: 1\n")
+            agent_block = event_frame(
                 b"Event-Name: CHANNEL_BRIDGE\n"
                 b"Unique-ID: uuid-agent\n"
                 b"Bridge-A-Unique-ID: uuid-caller\n"
                 b"Bridge-B-Unique-ID: uuid-agent\n"
                 b"Channel-Name: sofia/internal/8002@192.168.0.87\n"
-                b"Caller-Destination-Number: 8002\n\n")
+                b"Caller-Destination-Number: 8002\n")
             conn.sendall(caller_block + agent_block)
             time.sleep(0.5)
             conn.close()
