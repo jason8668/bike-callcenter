@@ -19,7 +19,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from bridge_core import Bridge, CallStore, summarize_call_history
-from export_xlsx import CALL_COLUMNS, XLSX_MIME, build_xlsx, call_row
+from export_xlsx import (CALL_COLUMNS, XLSX_MIME, build_xlsx, call_row,
+                          display_call_id)
 
 BRIDGE_SECRET = os.environ.get("BRIDGE_SECRET", "")
 RECORDING_DIR = os.environ.get("RECORDING_DIR", "/recordings")
@@ -736,6 +737,7 @@ def desk_page_html(seat: str) -> str:
       <h2>通话记录</h2>
       <div class="search">
         <input id="fCaller" placeholder="搜电话号码">
+        <button class="btn btn-sm" onclick="searchList()">搜索</button>
         <div class="seg" id="kindSeg">
           <button type="button" data-kind="" class="on">全部</button>
           <button type="button" data-kind="电话">电话</button>
@@ -744,7 +746,6 @@ def desk_page_html(seat: str) -> str:
         </div>
         <input type="hidden" id="fKind" value="">
         <div class="date-field"><input id="fDate" type="text" placeholder="按日期筛选" readonly onclick="openDatePicker(this)"><span class="date-chev">▾</span></div>
-        <button class="btn btn-sm" onclick="searchList()">搜索</button>
         <span style="display:inline-flex;align-items:center;gap:6px;flex:none"><span style="color:var(--muted);font-size:13px">导出最近</span><input id="fDays" type="text" inputmode="numeric" value="30" title="导出天数" style="width:64px;flex:none"><span style="color:var(--muted);font-size:13px">天</span><button class="btn btn-sm btn-ghost" onclick="openExportPreview()">查询</button></span>
       </div>
       <div id="list"><div class="empty">加载中…</div></div>
@@ -1096,7 +1097,7 @@ async function openRecord(id) {
     '<div class="meta-grid">' +
     '<div class="meta-item"><span>客服人员</span><b>' + esc(d.agent || d.owner_seat || "—") + "</b></div>" +
     '<div class="meta-item"><span>通话时长</span><b>' + esc(d.duration) + "</b></div>" +
-    '<div class="meta-item meta-wide"><span>通话ID</span><b class="mono">' + esc(d.call_id) + "</b></div>" +
+    '<div class="meta-item meta-wide"><span>通话ID</span><b class="mono">' + esc(d.display_id || d.call_id) + "</b></div>" +
     '<div class="meta-item meta-wide"><span>录音</span>' + audio + "</div></div>";
   currentDefaults = d.default_tags || [];
   renderTagChips(d.tags || []);
@@ -1256,6 +1257,7 @@ async function pollFeed() {
   } catch (e) { /* next poll retries in 3s */ }
 }
 refreshMe(); refreshSeats(); refreshList(); pollFeed();
+$("fCaller").addEventListener("keydown", function(e) { if (e.key === "Enter") searchList(); });
 setInterval(pollFeed, 3000);
 setInterval(function() { refreshMe(); refreshSeats(); }, 30000);
 var params = new URLSearchParams(location.search);
@@ -1446,6 +1448,7 @@ def desk_record(request: Request, record_id: int):
     rec = bridge.store.get_record(record_id)
     if not rec:
         raise HTTPException(status_code=404, detail="record not found")
+    rec["display_id"] = display_call_id(rec)
     rec["history_hint"] = bridge.record_history_hint(record_id)
     rec["default_tags"] = DEFAULT_TAGS
     return rec

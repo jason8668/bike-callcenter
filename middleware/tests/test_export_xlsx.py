@@ -7,7 +7,8 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from bridge_core import CallStore, parse_cdr  # noqa: E402
-from export_xlsx import CALL_COLUMNS, build_xlsx, call_row, format_ts  # noqa: E402
+from export_xlsx import (CALL_COLUMNS, build_xlsx, call_row,  # noqa: E402
+                          display_call_id, format_ts)
 
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
@@ -97,7 +98,7 @@ class TestRowBuilders(unittest.TestCase):
         self.assertEqual(row[5], "还车异常")
         self.assertEqual(row[6], "还不了车")
         self.assertEqual(row[7], "abc-1.wav")
-        self.assertEqual(row[8], "abc-1")
+        self.assertEqual(row[8], "20261024-080000-8001")
 
     def test_call_row_missed_and_voicemail(self):
         missed = call_row({
@@ -107,6 +108,8 @@ class TestRowBuilders(unittest.TestCase):
             "answered": False})
         self.assertEqual(missed[3], "未接")
         self.assertEqual(missed[4], "热线电话")
+        self.assertEqual(missed[8], "20261024-080000")
+        self.assertEqual(display_call_id({"call_id": "abc-1"}), "abc-1")
         vm = call_row({
             "call_id": "v-1", "caller": "13900000000", "agent": "8002",
             "kind": "留言", "duration_sec": 8, "start_epoch": 1792800000,
@@ -114,6 +117,7 @@ class TestRowBuilders(unittest.TestCase):
             "answered": True})
         self.assertEqual(vm[4], "语音留言")
         self.assertEqual(vm[3], "0分08秒")
+        self.assertEqual(vm[8], "20261024-080000-8002")
 
     def test_format_ts_edge_cases(self):
         self.assertEqual(format_ts(0), "")

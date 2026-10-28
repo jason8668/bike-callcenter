@@ -52,6 +52,21 @@ def format_ts(epoch) -> str:
     return datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def display_call_id(r: dict) -> str:
+    """Human-readable record ID for display and export: date, time and
+    answering seat, e.g. 20261028-102236-8002. The internal UUID is left
+    untouched: it binds the recording file and the CDR, so changing it
+    would break playback and hangup matching. Rows without a start time
+    fall back to the UUID so they still show something."""
+    r = r or {}
+    ts = format_ts(r.get("start_epoch"))
+    if not ts:
+        return r.get("call_id") or ""
+    base = ts.replace("-", "").replace(" ", "-").replace(":", "")
+    agent = r.get("agent") or ""
+    return base + ("-" + agent if agent else "")
+
+
 def call_row(r: dict) -> list:
     """Flatten one record dict from CallStore.list_calls into an
     export row (legacy 通话记录 columns)."""
@@ -66,7 +81,7 @@ def call_row(r: dict) -> list:
         format_ts(r.get("start_epoch")), r.get("caller") or "",
         r.get("agent") or "", duration_text, channel,
         r.get("service_type") or "", r.get("question") or "",
-        r.get("recording_file") or "", r.get("call_id") or "",
+        r.get("recording_file") or "", display_call_id(r),
     ]
 
 
